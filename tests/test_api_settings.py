@@ -21,7 +21,7 @@ def test_get_settings_shape_and_defaults(client):
     assert resp.json() == {
         "second_check_default": True,
         "session_minutes": 30,
-        "default_quality_points": ["sauber", "unbeschädigt", "funktion"],
+        "default_quality_points": ["sauber", "unbeschädigt", "Funktion geprüft"],
     }
 
 

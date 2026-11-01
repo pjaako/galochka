@@ -28,87 +28,10 @@
     done_released: "pack.done_released"
   };
 
-  function reportError(err) {
-    C.toast((err && err.detail) || C.t("error.generic"));
-  }
-
-  function clearNode(node) {
-    while (node.firstChild) node.removeChild(node.firstChild);
-  }
-
-  function el(tagName, className, text) {
-    var node = document.createElement(tagName);
-    if (className) node.className = className;
-    if (text !== undefined) node.textContent = text;
-    return node;
-  }
-
-  function button(label, className, onClick) {
-    var btn = el("button", "btn " + (className || ""), label);
-    btn.type = "button";
-    if (onClick) btn.addEventListener("click", onClick);
-    return btn;
-  }
-
-  // Item search against GET /api/items?q= (worker session). Choosing an item fills an empty label.
-  function itemPicker(onPick) {
-    var wrap = el("div", "item-picker");
-    var input = el("input", "input-id");
-    input.type = "text";
-    input.setAttribute("autocomplete", "off");
-    input.setAttribute("placeholder", C.t("pack.extra_item_placeholder"));
-    var list = el("div", "item-picker__list");
-    list.hidden = true;
-    wrap.appendChild(input);
-    wrap.appendChild(list);
-    var seq = 0;
-    var timer = null;
-
-    function hide() {
-      seq += 1;
-      list.hidden = true;
-      clearNode(list);
-    }
-
-    function show(items) {
-      clearNode(list);
-      if (!items.length) list.appendChild(el("div", "item-picker__none", C.t("pack.extra_item_none")));
-      items.forEach(function (item) {
-        var btn = el("button", "item-picker__option", item.item_id + " – " + item.name);
-        btn.type = "button";
-        btn.addEventListener("mousedown", function (event) { event.preventDefault(); choose(item); });
-        btn.addEventListener("click", function () { choose(item); });
-        list.appendChild(btn);
-      });
-      list.hidden = false;
-    }
-
-    function choose(item) {
-      input.value = item.item_id + " – " + item.name;
-      hide();
-      onPick(item);
-    }
-
-    input.addEventListener("input", function () {
-      onPick(null);
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(async function () {
-        var q = input.value.trim();
-        seq += 1;
-        var mine = seq;
-        if (!q) {
-          hide();
-          return;
-        }
-        try {
-          var items = await C.api("/api/items?q=" + encodeURIComponent(q) + "&limit=10");
-          if (mine === seq) show(items);
-        } catch (err) { /* the search is optional */ }
-      }, 250);
-    });
-    input.addEventListener("blur", function () { setTimeout(hide, 200); });
-    return wrap;
-  }
+  var el = C.el;
+  var clearNode = C.clearNode;
+  var button = C.button;
+  var reportError = C.reportError;
 
   function mount(container, job, options) {
     options = options || {};
@@ -120,8 +43,10 @@
     var editing = {}; // line id -> true after "Ändern"
     var flagged = {}; // line id -> true: reported open by the server on finish
     var busy = false;
-    var draft = null; // the unsent answer for the line on screen
+    var drafts = {}; // line id -> the unsent answer (survives swiping to another line and back)
+    var draft = null; // the unsent answer for the line on screen (an entry of drafts)
     var extraDraft = null; // the "Zusätzliches Teil" form
+    var extraReturn = null; // {view, idx} to go back to when the extra form is cancelled
     var doneStatus = null;
 
     // The component owns its DOM: head, strip, navigation, body, tools and the sticky action bar.
@@ -144,9 +69,13 @@
     barEl.setAttribute("aria-valuemax", "100");
     var barFill = make("div", "progress-bar__fill", "pack-bar-fill");
     var progressEl = make("p", "pack-progress", "pack-progress");
+    var rejectEl = make("div", "chk-banner chk-banner--reject", "pack-reject");
+    rejectEl.setAttribute("role", "alert");
+    rejectEl.hidden = true;
     barEl.appendChild(barFill);
     headEl.appendChild(orderEl);
     headEl.appendChild(metaEl);
+    headEl.appendChild(rejectEl);
     headEl.appendChild(barEl);
     headEl.appendChild(progressEl);
     headEl.hidden = true;
@@ -229,6 +158,23 @@
       var percent = total ? Math.round((done / total) * 100) : 0;
       barFill.style.width = percent + "%";
       barEl.setAttribute("aria-valuenow", String(percent));
+      renderReject();
+    }
+
+    // After a rejected second check the packer sees why and which attempt this is.
+    function renderReject() {
+      clearNode(rejectEl);
+      var latest = null;
+      (job.checks || []).some(function (check) {
+        if (check.result !== "rejected") return false;
+        latest = check;
+        return true;
+      });
+      var show = !!latest && job.attempt > 1 && editable && view !== "done";
+      rejectEl.hidden = !show;
+      if (!show) return;
+      rejectEl.appendChild(el("strong", "", C.fmt(C.t("pack.rejected_attempt"), { n: job.attempt })));
+      rejectEl.appendChild(el("div", "", C.fmt(C.t("pack.rejected_by"), { name: latest.worker_name, note: latest.note })));
     }
 
     function renderStrip() {
@@ -290,15 +236,28 @@
       showLine(i);
     }
 
-    function revokePhoto() {
-      if (draft && draft.photoUrl) {
-        try { URL.revokeObjectURL(draft.photoUrl); } catch (e) { /* ignore */ }
+    function revokePhoto(d) {
+      if (d && d.photoUrl) {
+        try { URL.revokeObjectURL(d.photoUrl); } catch (e) { /* ignore */ }
+        d.photoUrl = null;
       }
     }
 
-    function newDraft(line) {
-      revokePhoto();
-      draft = {
+    // A draft is thrown away only when its answer was sent, cancelled or the page closes.
+    function discardDraft(lineId) {
+      var old = drafts[lineId];
+      if (!old) return;
+      revokePhoto(old);
+      delete drafts[lineId];
+      if (draft === old) draft = null;
+    }
+
+    function discardAllDrafts() {
+      Object.keys(drafts).forEach(function (id) { discardDraft(id); });
+    }
+
+    function createDraft(line) {
+      var fresh = {
         lineId: line.id,
         quality: {},
         serials: [],
@@ -310,23 +269,41 @@
       };
       // "Ändern": start from the earlier answers (the photo has to be taken again)
       if (editing[line.id] && line.latest) {
-        Object.keys(line.latest.quality || {}).forEach(function (key) { draft.quality[key] = line.latest.quality[key]; });
-        draft.serials = (line.latest.serials || []).slice();
+        Object.keys(line.latest.quality || {}).forEach(function (key) { fresh.quality[key] = line.latest.quality[key]; });
+        fresh.serials = (line.latest.serials || []).slice();
+      }
+      return fresh;
+    }
+
+    // The draft of a line: the stored one, or a new one (stored on first use).
+    function draftFor(line) {
+      if (!drafts[line.id]) drafts[line.id] = createDraft(line);
+      return drafts[line.id];
+    }
+
+    // Leaving a line in "Ändern" mode drops the edit (and its draft): the confirmed answer stays as it was.
+    function leaveLine() {
+      var line = currentLine();
+      if (view === "line" && line && editing[line.id]) {
+        delete editing[line.id];
+        discardDraft(line.id);
       }
     }
 
     function showLine(i) {
       if (busy) return;
+      leaveLine();
       idx = i;
       view = "line";
       var line = currentLine();
-      if (line) newDraft(line);
+      draft = line ? draftFor(line) : null;
       window.scrollTo(0, 0);
       renderAll();
     }
 
     function showSummary() {
       if (busy) return;
+      leaveLine();
       view = "summary";
       window.scrollTo(0, 0);
       renderAll();
@@ -334,6 +311,8 @@
 
     function showExtra() {
       if (busy) return;
+      leaveLine();
+      extraReturn = { view: view === "extra" ? "summary" : view, idx: idx };
       view = "extra";
       extraDraft = { picked: null };
       window.scrollTo(0, 0);
@@ -448,6 +427,7 @@
           input.setAttribute("placeholder", C.fmt(C.t("pack.serial_placeholder"), { n: n + 1 }));
           input.setAttribute("data-serial", String(n));
           input.addEventListener("input", function () { draft.serials[n] = input.value; });
+          serialWrap.appendChild(C.hiddenLabel(input, C.fmt(C.t("pack.serial_placeholder"), { n: n + 1 })));
           serialWrap.appendChild(input);
         })(i);
       }
@@ -472,12 +452,13 @@
       input.addEventListener("change", function () {
         var file = input.files && input.files[0];
         if (!file) return;
-        revokePhoto();
+        revokePhoto(draft);
         draft.photo = file;
         draft.photoUrl = URL.createObjectURL(file);
         renderPhoto(line);
       });
       label.appendChild(input);
+      C.keyboardLabel(label, input);
       photoWrap.appendChild(label);
       if (required) photoWrap.appendChild(el("p", "pack-photo-hint", "★ " + C.t("pack.photo_required")));
     }
@@ -508,6 +489,7 @@
       reason.value = draft.reason;
       reason.setAttribute("placeholder", C.t("pack.reason_placeholder"));
       reason.setAttribute("data-reason", "1");
+      reason.setAttribute("aria-label", C.t("pack.reason_placeholder"));
       reason.addEventListener("input", function () { draft.reason = reason.value; });
       panelWrap.appendChild(reason);
     }
@@ -541,9 +523,10 @@
       }).join(", ");
     }
 
-    function buildConfirmed(line) {
+    function buildConfirmed(line, previous) {
       var latest = line.latest;
-      var box = el("div", "pack-done");
+      var box = el("div", "pack-done" + (previous ? " pack-done--previous" : ""));
+      if (previous) box.appendChild(el("p", "pack-block__title", C.t("pack.previous_answer")));
       var row = el("div", "pack-done__row");
       row.appendChild(stateBadge(latest.result));
       row.appendChild(el("span", "", C.fmt(C.t("pack.by"), { name: latest.worker_name })));
@@ -562,10 +545,18 @@
         img.style.marginTop = "8px";
         box.appendChild(img);
       }
-      if (editable) {
+      if (previous) {
+        box.appendChild(button(C.t("pack.cancel"), "btn--secondary pack-edit-cancel", function () {
+          delete editing[line.id];
+          discardDraft(line.id);
+          draft = null;
+          renderAll();
+        }));
+      } else if (editable) {
         box.appendChild(button(C.t("pack.change"), "btn--secondary", function () {
           editing[line.id] = true;
-          newDraft(line);
+          discardDraft(line.id);
+          draft = draftFor(line);
           renderAll();
         }));
       }
@@ -602,6 +593,7 @@
         return;
       }
 
+      if (editing[line.id] && line.latest) card.appendChild(buildConfirmed(line, true));
       qualityWrap = el("div", "pack-block");
       serialWrap = el("div", "pack-block");
       photoWrap = el("div", "pack-block");
@@ -684,6 +676,7 @@
         lines[idx] = mergeLine(lines[idx], answer.line);
         delete editing[line.id];
         delete flagged[line.id];
+        discardDraft(line.id); // sent: the photo preview is no longer needed
         busy = false;
         var next = nextOpenIndex(idx);
         if (next === -1) {
@@ -718,6 +711,7 @@
       try {
         await C.api("/api/lines/" + line.id, { method: "DELETE" });
         lines = lines.filter(function (other) { return other.id !== line.id; });
+        discardDraft(line.id);
         busy = false;
         if (idx >= lines.length) idx = Math.max(0, lines.length - 1);
         if (lines.length) {
@@ -740,13 +734,6 @@
       form.appendChild(el("h2", "pack-line__label", txt("extra_title")));
       form.appendChild(el("p", "field__help", txt("extra_help")));
 
-      function field(labelKey, control) {
-        var box = el("div", "field");
-        box.appendChild(el("label", "field__label", C.t(labelKey)));
-        box.appendChild(control);
-        return box;
-      }
-
       var labelInput = el("input", "input-id");
       labelInput.type = "text";
       labelInput.maxLength = 120;
@@ -763,14 +750,16 @@
       reasonInput.maxLength = 200;
       reasonInput.id = "extra-reason";
 
-      var picker = itemPicker(function (item) {
-        extraDraft.picked = item;
-        if (item && !labelInput.value.trim()) labelInput.value = item.name;
+      var picker = C.itemPicker({
+        onPick: function (item) {
+          extraDraft.picked = item;
+          if (item && !labelInput.value.trim()) labelInput.value = item.name;
+        },
       });
-      form.appendChild(field("pack.extra_item", picker));
-      form.appendChild(field("pack.extra_label", labelInput));
-      form.appendChild(field("pack.extra_qty", qtyInput));
-      form.appendChild(field("pack.extra_reason", reasonInput));
+      form.appendChild(C.field(C.t("pack.extra_item"), picker));
+      form.appendChild(C.field(C.t("pack.extra_label"), labelInput));
+      form.appendChild(C.field(C.t("pack.extra_qty"), qtyInput));
+      form.appendChild(C.field(C.t("pack.extra_reason"), reasonInput));
       extraDraft.read = function () {
         return {
           item_id: extraDraft.picked ? extraDraft.picked.item_id : null,
@@ -780,6 +769,18 @@
         };
       };
       bodyEl.appendChild(form);
+    }
+
+    // Back to where the form was opened: the line that was on screen, or the summary.
+    function cancelExtra() {
+      var back = extraReturn || { view: "summary", idx: idx };
+      extraReturn = null;
+      if (back.view === "line" && lines[back.idx]) {
+        showLine(back.idx);
+      } else {
+        view = "summary";
+        renderAll();
+      }
     }
 
     async function sendExtra() {
@@ -802,6 +803,7 @@
         var line = await C.api("/api/jobs/" + jobId + "/lines", { body: data });
         lines.push(line);
         lines.sort(function (a, b) { return a.position - b.position; });
+        extraReturn = null;
         busy = false;
         showLine(lines.indexOf(lines.filter(function (other) { return other.id === line.id; })[0]));
       } catch (err) {
@@ -878,6 +880,7 @@
         var result = await C.api("/api/jobs/" + jobId + "/finish", { method: "POST" });
         doneStatus = result.status;
         job.status = result.status;
+        discardAllDrafts();
         busy = false;
         editable = false;
         if (typeof options.onFinish === "function") {
@@ -942,7 +945,7 @@
         }
       } else if (editable && view === "extra") {
         show = true;
-        actionsEl.appendChild(actionButton(C.t("pack.cancel"), "", false, function () { view = "summary"; renderAll(); }));
+        actionsEl.appendChild(actionButton(C.t("pack.cancel"), "", false, cancelExtra));
         actionsEl.appendChild(actionButton(txt("extra_add"), "btn--primary", false, sendExtra));
       } else if (editable && view === "summary") {
         show = true;
@@ -986,12 +989,13 @@
     if (editable && open.length) {
       idx = open[0];
       view = "line";
-      newDraft(lines[idx]);
+      draft = draftFor(lines[idx]);
     } else {
       view = "summary";
     }
+    window.addEventListener("pagehide", discardAllDrafts);
     renderAll();
   }
 
-  window.Lines = { mount: mount, itemPicker: itemPicker };
+  window.Lines = { mount: mount };
 })();

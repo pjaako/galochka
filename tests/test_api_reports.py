@@ -194,7 +194,7 @@ def test_deviations_count_non_ok_and_worker_lines_of_the_current_stage(client, w
     image = make_image()
     assert _confirm(worker, a, image=image).status_code == 201
     assert _confirm(worker, b, "missing", qty=0, reason="Teil nicht da").status_code == 201
-    assert _confirm(worker, c, "not_ok", image=image, reason="Kratzer", quality={"sauber": "not_ok", "unbeschädigt": "ok", "funktion": "ok"}).status_code == 201
+    assert _confirm(worker, c, "not_ok", image=image, reason="Kratzer", quality={"sauber": "not_ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"}).status_code == 201
     extra = worker.post(f"/api/jobs/{job['id']}/lines", json={"label": "Extra", "qty": 1, "reason": "Kunde wollte es"})
     assert extra.status_code == 201, extra.text
     assert _search(client, status="packing")[0]["deviations"] == 3  # missing, not_ok, worker line
@@ -367,7 +367,7 @@ def test_export_has_one_row_per_confirmation_check_and_note(client, new_worker_c
     assert cable[1:12] == ["Lieferung", "Versendet", "Ä-100", 'Müller; Söhne "GmbH"', "Prüfstand", "1/1", "Packen", "1", "",
                            "Kabel", "2"]
     assert cable[13:15] == ["in Ordnung", "2"]
-    assert cable[16] == "sauber=ok, unbeschädigt=ok, funktion=ok"  # quality points in order, umlauts intact
+    assert cable[16] == "sauber=ok, unbeschädigt=ok, Funktion geprüft=ok"  # quality points in order, umlauts intact
     assert cable[18] == "Anna" and cable[19] == "1"
     assert cable[21].startswith(f"/photos/jobs/{job_id}/") and cable[21].endswith(".jpg")
     assert device[15] == "SN-1" and device[11] == "1"

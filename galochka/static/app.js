@@ -234,10 +234,187 @@
     });
   }
 
+  // --- shared DOM helpers (every page builds its DOM with these) ---------------
+
+  function el(tagName, className, text) {
+    var node = document.createElement(tagName);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function clearNode(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function button(label, className, onClick) {
+    var btn = el("button", "btn " + (className || ""), label);
+    btn.type = "button";
+    if (onClick) btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function reportError(err) {
+    toast((err && err.detail) || t("error.generic"));
+  }
+
+  // A form row: <div class="field"><label for=...>text</label>control</div>. `control` is an input /
+  // textarea / select element or an itemPicker ({el, input}); the label is tied to the input by id.
+  var fieldSeq = 0;
+  function field(labelText, control) {
+    var box = el("div", "field");
+    var target = control.input || control;
+    if (!target.id) {
+      fieldSeq += 1;
+      target.id = "field-" + fieldSeq;
+    }
+    var label = el("label", "field__label", labelText);
+    label.htmlFor = target.id;
+    box.appendChild(label);
+    box.appendChild(control.el || control);
+    return box;
+  }
+
+  // Visually hidden <label for=id> for an input that only has a placeholder.
+  function hiddenLabel(input, text) {
+    if (!input.id) {
+      fieldSeq += 1;
+      input.id = "field-" + fieldSeq;
+    }
+    var label = el("label", "sr-only", text);
+    label.htmlFor = input.id;
+    return label;
+  }
+
+  // A <label class="photo-button"> that wraps a hidden file input is not reachable by keyboard
+  // on its own: make it a button (Enter/Space open the camera like a click).
+  function keyboardLabel(label, input) {
+    label.setAttribute("tabindex", "0");
+    label.setAttribute("role", "button");
+    label.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        input.click();
+      }
+    });
+  }
+
+  // Item search against GET /api/items?q= with a small result list.
+  // opts: onPick(item|null)  item = {item_id, name} from the API; null while the text is edited.
+  //       initial {id, name}  preselected item; fetch(path) -> Promise (default: worker session api).
+  //       label  accessible name of the input.
+  // Returns {el, input, getId(), isValid()}: isValid is true for an empty field or a picked item.
+  function itemPicker(opts) {
+    opts = opts || {};
+    var fetchItems = opts.fetch || api;
+    var wrap = el("div", "item-picker");
+    var input = el("input", "input-id");
+    input.type = "text";
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("placeholder", t("pack.extra_item_placeholder"));
+    input.setAttribute("aria-label", opts.label || t("pack.extra_item"));
+    var list = el("div", "item-picker__list");
+    list.hidden = true;
+    wrap.appendChild(input);
+    wrap.appendChild(list);
+    var picked = null;
+    var seq = 0;
+    var timer = null;
+
+    function hide() {
+      seq += 1;
+      list.hidden = true;
+      clearNode(list);
+    }
+
+    function itemText(item) {
+      return item.name ? item.item_id + " – " + item.name : item.item_id;
+    }
+
+    function choose(item) {
+      picked = item;
+      input.value = itemText(item);
+      hide();
+      if (opts.onPick) opts.onPick(item);
+    }
+
+    function show(items) {
+      clearNode(list);
+      if (!items.length) list.appendChild(el("div", "item-picker__none", t("pack.extra_item_none")));
+      items.forEach(function (item) {
+        var btn = el("button", "item-picker__option", itemText(item));
+        btn.type = "button";
+        // mousedown keeps the focus in the input; click covers touch and keyboard (Enter/Space)
+        btn.addEventListener("mousedown", function (event) { event.preventDefault(); choose(item); });
+        btn.addEventListener("click", function () { choose(item); });
+        btn.addEventListener("keydown", function (event) {
+          if (event.key === "ArrowDown" && btn.nextElementSibling) {
+            event.preventDefault();
+            btn.nextElementSibling.focus();
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            (btn.previousElementSibling || input).focus();
+          } else if (event.key === "Escape") {
+            hide();
+            input.focus();
+          }
+        });
+        list.appendChild(btn);
+      });
+      list.hidden = false;
+    }
+
+    input.addEventListener("input", function () {
+      picked = null;
+      if (opts.onPick) opts.onPick(null);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async function () {
+        var q = input.value.trim();
+        seq += 1;
+        var mine = seq;
+        if (!q) {
+          hide();
+          return;
+        }
+        try {
+          var items = await fetchItems("/api/items?q=" + encodeURIComponent(q) + "&limit=10");
+          if (mine === seq) show(items);
+        } catch (err) { /* the search is optional */ }
+      }, 250);
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "ArrowDown" && !list.hidden && list.firstChild && list.firstChild.focus) {
+        event.preventDefault();
+        list.firstChild.focus();
+      } else if (event.key === "Escape") {
+        hide();
+      }
+    });
+    // Leave the list open while the focus moves into it (keyboard users tab to the options).
+    wrap.addEventListener("focusout", function () {
+      setTimeout(function () {
+        if (!wrap.contains(document.activeElement)) hide();
+      }, 150);
+    });
+    if (opts.initial && opts.initial.id) {
+      picked = { item_id: opts.initial.id, name: opts.initial.name };
+      input.value = itemText(picked);
+    }
+
+    return {
+      el: wrap,
+      input: input,
+      getId: function () { return picked ? picked.item_id : null; },
+      isValid: function () { return input.value.trim() === "" || picked !== null; },
+    };
+  }
+
   window.C = {
     downscaleImage: downscaleImage, t: t, loadStrings: loadStrings, api: api, toast: toast,
     expertApi: expertApi, getExpertPassword: getExpertPassword, setExpertPassword: setExpertPassword,
     clearExpertPassword: clearExpertPassword, renderPhotoTile: renderPhotoTile,
     fmt: fmt, loadMe: loadMe, logout: logout, goLogin: goLogin,
+    el: el, clearNode: clearNode, button: button, reportError: reportError, keyboardLabel: keyboardLabel, field: field, hiddenLabel: hiddenLabel,
+    itemPicker: itemPicker,
   };
 })();

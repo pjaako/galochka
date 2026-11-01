@@ -283,7 +283,8 @@ def create_app(settings: Settings) -> FastAPI:
         data = _read_upload(image)
         text = qr.decode_qr(data)  # image decoding stays outside the lock
         if text is None:
-            raise HTTPException(status_code=400, detail=t("error.bad_image"))
+            # A readable photo without a code is a different problem than a broken file.
+            raise HTTPException(status_code=400, detail=t("error.no_qr" if qr.is_image(data) else "error.bad_image"))
         match = qr.BADGE_RE.fullmatch(text)
         badge = None
         if match:
@@ -372,7 +373,7 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=400, detail=t("error.invalid_request"))
         with lock:
             rows = repo.list_jobs(conn, statuses, kind, worker["id"] if mine else None)
-        return [repo.job_to_dict(r) for r in rows]
+            return repo.job_list_dicts(conn, rows)
 
     @app.post("/api/jobs", status_code=201)
     def create_adhoc_job(body: JobCreateRequest, worker=Depends(require_worker)):

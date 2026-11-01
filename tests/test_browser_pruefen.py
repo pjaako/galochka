@@ -145,6 +145,10 @@ def test_second_worker_releases_the_box(browser, live_server, seeded, pack_job, 
         expect(row.locator(".state-badge--ok")).to_have_text("OK")
         expect(row.locator(".chk-thumb img")).to_have_count(1)
         assert row.locator(".chk-thumb").get_attribute("target") == "_blank"
+        page.set_viewport_size({"width": 412, "height": 520})  # the bar stays on the screen, not below the list
+        bar = page.locator("#chk-actions").bounding_box()
+        assert bar["y"] + bar["height"] <= 520.5, bar
+        page.set_viewport_size({"width": 412, "height": 915})
         page.screenshot(path=str(tmp_path / "pruefen.png"))
         assert (tmp_path / "pruefen.png").stat().st_size > 1000
 
@@ -162,14 +166,14 @@ def test_second_worker_releases_the_box(browser, live_server, seeded, pack_job, 
         label_link = released.get_by_role("link", name="Etikett drucken")
         assert label_link.get_attribute("href") == f"/druck/etikett/{job_id}"
         assert label_link.get_attribute("target") == "_blank"
-        expect(released.get_by_role("button", name="Versendet")).to_be_visible()
+        expect(released.get_by_role("button", name="Als versendet markieren")).to_be_visible()
         expect(released.get_by_role("link", name="Zur Übersicht")).to_be_visible()
 
         job = _status(url, job_id)
         assert job["status"] == "checked"
         assert job["checks"][0]["worker_name"] == "Bert Prüfer" and job["checks"][0]["photo_url"].startswith("/photos/")
 
-        released.get_by_role("button", name="Versendet").click()
+        released.get_by_role("button", name="Als versendet markieren").click()
         expect(page.locator("#toast")).to_have_text("Als versendet markiert.")
         assert _status(url, job_id)["status"] == "shipped"
     finally:
@@ -184,15 +188,36 @@ def test_second_worker_rejects_with_a_reason(browser, live_server, seeded, pack_
         _login(page, url, seeded["bert"])
         page.goto(f"{url}/pruefen/{job_id}")
         page.get_by_role("button", name="Zurück an Packer").click()
-        page.get_by_role("button", name="Zurück schicken").click()
+        page.get_by_role("button", name="Zurückschicken").click()
         expect(page.locator("#toast")).to_have_text("Bitte einen Grund angeben (mindestens 3 Zeichen).")
         assert _status(url, job_id)["status"] == "packed"
         page.fill("#chk-reject-note", "Kabel ist verkratzt")
-        page.get_by_role("button", name="Zurück schicken").click()
-        page.wait_for_url(f"{url}/auftraege")
+        page.get_by_role("button", name="Zurückschicken").click()
+        # same end view as after a release: no automatic redirect
+        rejected = page.locator("#chk-rejected")
+        expect(rejected).to_contain_text("Zurück an die Packer geschickt.")
+        expect(rejected.get_by_role("link", name="Zur Übersicht")).to_be_visible()
+        expect(rejected.get_by_role("button", name="Fertig und abmelden")).to_be_visible()
+        expect(page.locator("#chk-actions")).to_be_hidden()
         job = _status(url, job_id)
         assert job["status"] == "packing" and job["attempt"] == 2
         assert job["checks"][0]["result"] == "rejected" and job["checks"][0]["note"] == "Kabel ist verkratzt"
+    finally:
+        context.close()
+
+    # the packer sees why: tag + note on the Aufträge card, red banner with the attempt on Packen
+    context, page = _mobile_page(browser)
+    try:
+        _login(page, url, seeded["anna"])
+        card = page.locator(f'.card[data-job-id="{job_id}"]')
+        expect(card.locator(".tag--bad")).to_have_text("zurückgewiesen")
+        expect(card).to_contain_text("Zurückgewiesen von Bert Prüfer: Kabel ist verkratzt")
+        card.get_by_role("button", name="Packen").click()
+        page.wait_for_url(f"{url}/packen/{job_id}")
+        banner = page.locator("#pack-reject")
+        expect(banner).to_be_visible()
+        expect(banner).to_contain_text("Versuch 2")
+        expect(banner).to_contain_text("Zurückgewiesen von Bert Prüfer: Kabel ist verkratzt")
     finally:
         context.close()
 
@@ -206,6 +231,10 @@ def test_packer_is_locked_out_of_the_check(browser, live_server, seeded, pack_jo
         page.goto(f"{url}/pruefen/{job_id}")
         expect(page.locator("#chk-locked")).to_contain_text("selbst gepackt")
         expect(page.locator(".chk-row")).to_have_count(1)
+        expect(page.locator(".photo-button")).to_have_count(0)  # no box photo for a box that cannot be released
+        page.goto(f"{url}/auftraege")
+        expect(page.locator(f'.card[data-job-id="{job_id}"]')).to_be_visible()
+        expect(page.locator(f'.card[data-job-id="{job_id}"]').get_by_role("link", name="Prüfen")).to_have_count(0)
         expect(page.get_by_role("button", name="Freigeben")).to_have_count(0)
     finally:
         context.close()
@@ -298,5 +327,43 @@ def test_label_of_an_unreleased_box_warns_and_unknown_job_says_so(browser, live_
         expect(page.locator("#label-text")).not_to_contain_text("geprüft")
         page.goto(f"{url}/druck/etikett/99999")
         expect(page.locator("#error-note")).to_have_text("Auftrag nicht gefunden.")
+    finally:
+        context.close()
+
+
+def test_label_with_long_customer_and_template_keeps_the_order_number(browser, live_server, seeded, tmp_path):
+    url = live_server["url"]
+    long_name = "Montageset mit extrem langem Namen für die Sonderanfertigung " + "x" * 40
+    with httpx.Client(base_url=url, headers=EXPERT) as expert:
+        template = expert.post("/api/expert/templates", json={"name": long_name, "lines": [{"label": "Kabel", "qty": 1}]})
+        assert template.status_code == 201, template.text
+        created = expert.post(
+            "/api/expert/jobs",
+            json={"template_id": template.json()["id"], "order_ref": "L-4711", "customer": "K" * 60, "count": 2},
+        )
+        assert created.status_code == 201, created.text
+        job_id = created.json()[1]["id"]
+    context = browser.new_context(viewport={"width": 1024, "height": 800})
+    page = context.new_page()
+    page.set_default_timeout(8000)
+    try:
+        page.goto(f"{url}/druck/etikett/{job_id}")
+        page.fill("#password-input", PASSWORD)
+        page.click("#login-form button[type=submit]")
+        expect(page.locator("#label-order")).to_have_text("L-4711")
+        page.emulate_media(media="print")
+        text = page.inner_text("#label-text")
+        assert "L-4711" in text and "Karton 2/2" in text
+        # customer and set name are one clipped line each; order number and carton are fully inside the label
+        for selector in (".box-label__line--clip",):
+            for node in page.locator(selector).all():
+                assert node.evaluate("e => e.getBoundingClientRect().height < 20")
+        box = page.locator("#label-box").bounding_box()
+        for selector in ("#label-order", ".box-label__line:has-text('Karton')"):
+            inner = page.locator(selector).bounding_box()
+            assert inner["y"] >= box["y"] - 0.5 and inner["y"] + inner["height"] <= box["y"] + box["height"] + 0.5, selector
+        page.screenshot(path=str(tmp_path / "etikett-long.png"))
+        pdf = page.pdf(prefer_css_page_size=True)
+        assert len(re.findall(rb"/Type\s*/Page[^s]", pdf)) == 1
     finally:
         context.close()

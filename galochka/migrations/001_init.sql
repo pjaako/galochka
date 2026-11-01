@@ -191,7 +191,7 @@ CREATE TABLE settings (
 INSERT INTO settings(key, value) VALUES
   ('second_check_default', '1'),
   ('session_minutes', '30'),
-  ('default_quality_points', '["sauber","unbeschädigt","funktion"]'),
+  ('default_quality_points', '["sauber","unbeschädigt","Funktion geprüft"]'),
   ('items_synced_at', '');
 
 CREATE TABLE audit (

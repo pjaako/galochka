@@ -77,7 +77,7 @@ def test_foreign_keys_pragma_on(conn):
 def test_seed_settings(conn):
     assert repo.get_setting(conn, "second_check_default") == "1"
     assert repo.get_setting(conn, "session_minutes") == "30"
-    assert json.loads(repo.get_setting(conn, "default_quality_points")) == ["sauber", "unbeschädigt", "funktion"]
+    assert json.loads(repo.get_setting(conn, "default_quality_points")) == ["sauber", "unbeschädigt", "Funktion geprüft"]
     assert repo.get_setting(conn, "items_synced_at") == ""
     assert repo.get_setting(conn, "nope") is None
     assert repo.get_setting(conn, "nope", "dflt") == "dflt"

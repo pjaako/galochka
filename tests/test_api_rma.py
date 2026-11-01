@@ -336,7 +336,7 @@ def test_generate_outgoing_route(client, worker_client, make_image):
     ]
     assert lines[1]["reason"] == "ersetzt: Brummt" and lines[3]["reason"] == "Neu eingebaut"
     assert lines[3]["photo_required"] is True and all(ln["latest"] is None for ln in lines)
-    assert lines[0]["quality_points"] == ["sauber", "unbeschädigt", "funktion"] and "reference" in lines[0]
+    assert lines[0]["quality_points"] == ["sauber", "unbeschädigt", "Funktion geprüft"] and "reference" in lines[0]
     # the intake lines and the notes stay visible next to the outgoing lines
     assert [ln["stage"] for ln in detail["intake_lines"]] == ["intake"] * 3
     assert detail["intake_lines"][0]["latest"]["qty"] == 3 and len(detail["repair_notes"]) == 3

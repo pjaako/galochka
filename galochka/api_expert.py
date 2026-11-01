@@ -17,7 +17,7 @@ from galochka.cassandra_client import CassandraUnavailable
 
 router = APIRouter(prefix="/api/expert", dependencies=[Depends(require_expert)])
 
-_DEFAULT_QUALITY_POINTS = ["sauber", "unbeschädigt", "funktion"]
+_DEFAULT_QUALITY_POINTS = ["sauber", "unbeschädigt", "Funktion geprüft"]
 
 
 class SettingsRequest(BaseModel):

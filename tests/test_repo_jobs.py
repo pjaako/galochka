@@ -6,7 +6,7 @@ from galochka import repo
 
 NOW = "2026-11-01T10:00:00+00:00"
 LATER = "2026-11-01T11:00:00+00:00"
-Q = {"sauber": "ok", "unbeschädigt": "ok", "funktion": "ok"}  # all default quality points answered
+Q = {"sauber": "ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"}  # all default quality points answered
 
 
 def _worker(conn, name="Anna"):
@@ -267,7 +267,7 @@ def test_add_worker_line(conn):
     assert (row["source"], row["position"], row["label"], row["qty"], row["reason"], row["photo_required"]) == (
         "worker", 3, "Schraube", 4, "lag daneben", 1,
     )
-    assert json.loads(row["quality_points"]) == ["sauber", "unbeschädigt", "funktion"]
+    assert json.loads(row["quality_points"]) == ["sauber", "unbeschädigt", "Funktion geprüft"]
     assert repo.get_job(conn, job_id)["lines_total"] == 3
 
 

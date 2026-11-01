@@ -43,39 +43,16 @@
       var bodyEl = document.getElementById("rma-body");
       var linesEl = document.getElementById("rma-lines");
 
-      function reportError(err) {
-        C.toast((err && err.detail) || C.t("error.generic"));
-      }
-
-      function clearNode(node) {
-        while (node.firstChild) node.removeChild(node.firstChild);
-      }
-
-      function el(tagName, className, text) {
-        var node = document.createElement(tagName);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-      }
-
-      function button(label, className, onClick) {
-        var btn = el("button", "btn " + (className || ""), label);
-        btn.type = "button";
-        if (onClick) btn.addEventListener("click", onClick);
-        return btn;
-      }
+      var reportError = C.reportError;
+      var clearNode = C.clearNode;
+      var el = C.el;
+      var button = C.button;
+      var field = C.field;
 
       function link(label, className, href) {
         var a = el("a", "btn " + (className || ""), label);
         a.href = href;
         return a;
-      }
-
-      function field(labelText, control) {
-        var box = el("div", "field");
-        box.appendChild(el("label", "field__label", labelText));
-        box.appendChild(control);
-        return box;
       }
 
       function textInput(max) {
@@ -317,9 +294,11 @@
         var label = textInput(120);
         var qty = qtyInput(1, 999);
         var reason = reasonInput();
-        var picker = Lines.itemPicker(function (item) {
-          picked = item;
-          if (item && !label.value.trim()) label.value = item.name;
+        var picker = C.itemPicker({
+          onPick: function (item) {
+            picked = item;
+            if (item && !label.value.trim()) label.value = item.name;
+          },
         });
         box.appendChild(field(C.t("pack.extra_item"), picker));
         box.appendChild(field(C.t("pack.extra_label"), label));
@@ -512,6 +491,10 @@
           // Whoever opens the RMA takes it over (claim is allowed at every worker stage).
           var working = job.status === "intake" || job.status === "repair" || job.status === "outgoing";
           if (job.kind === "rma" && working && job.claimed_by !== me.id) {
+            if (job.claimed_by && !window.confirm(C.fmt(C.t("jobs.claim_confirm"), { name: job.claimed_by_name || "" }))) {
+              window.location.href = "/auftraege";
+              return;
+            }
             try {
               await C.api("/api/jobs/" + jobId + "/claim", { method: "POST" });
               await load();

@@ -22,6 +22,7 @@
     <!-- Login form of both branches: opened from the office PC with the expert password. -->
     <form id="login-form" class="login-form no-print" hidden>
       <p class="field__help" id="password-hint" data-i18n="print.password_hint"></p>
+      <label class="sr-only" for="password-input" data-i18n="expert.password_placeholder"></label>
       <input type="password" id="password-input" class="input-id" data-i18n-placeholder="expert.password_placeholder"
         autocomplete="off">
       <button type="submit" class="btn btn--primary" data-i18n="expert.login"></button>
@@ -144,7 +145,8 @@
 
       function labelLine(text, strong) {
         var line = document.createElement("div");
-        line.className = "box-label__line" + (strong ? " box-label__line--strong" : "");
+        line.className = "box-label__line box-label__line--clip" + (strong ? " box-label__line--strong" : "");
+        line.title = text; // the full text on screen when the label cuts it off
         line.textContent = text;
         labelText.appendChild(line);
         return line;
@@ -244,6 +246,7 @@
         } catch (err) {
           C.toast(C.t("error.generic"));
         }
+        await C.loadMe(); // name and "Abmelden" when a worker is logged in on this device; never redirects
         if (kind === "badge") {
           if (C.getExpertPassword()) {
             await showBadge();

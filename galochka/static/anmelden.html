@@ -73,9 +73,7 @@
         codeBtn.disabled = on;
       }
 
-      function reportError(err) {
-        C.toast((err && err.detail) || C.t("error.generic"));
-      }
+      var reportError = C.reportError;
 
       function loggedIn() {
         window.location.href = nextUrl();

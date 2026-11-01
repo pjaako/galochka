@@ -26,9 +26,7 @@
     (function () {
       var jobId = parseInt(window.location.pathname.split("/").pop(), 10);
 
-      function reportError(err) {
-        C.toast((err && err.detail) || C.t("error.generic"));
-      }
+      var reportError = C.reportError;
 
       // Head texts: a delivery shows "order – customer" and the carton; an RMA return "RMA <no> – Rücksendung".
       function headTexts(job) {
@@ -64,6 +62,11 @@
           var takeOver = (job.kind === "delivery" && (job.status === "open" || job.status === "packing"))
             || (job.kind === "rma" && job.status === "outgoing");
           if (takeOver && job.claimed_by !== me.id) {
+            // Opening the link must not silently take a colleague's job away.
+            if (job.claimed_by && !window.confirm(C.fmt(C.t("jobs.claim_confirm"), { name: job.claimed_by_name || "" }))) {
+              window.location.href = "/auftraege";
+              return;
+            }
             try {
               await C.api("/api/jobs/" + jobId + "/claim", { method: "POST" });
               job = await C.api("/api/jobs/" + jobId);

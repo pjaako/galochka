@@ -329,3 +329,182 @@ def test_expert_creates_a_customised_job_and_cancels_and_reopens_it(browser, liv
         expect(page.locator("#job-rows tr", has_text="C-300")).to_have_count(2)
     finally:
         context.close()
+
+
+def _expert_job(url, template_id, order_ref, customer="Kunde GmbH"):
+    with httpx.Client(base_url=url, headers=EXPERT) as api:
+        created = api.post(
+            "/api/expert/jobs", json={"template_id": template_id, "order_ref": order_ref, "customer": customer}
+        )
+        assert created.status_code == 201, created.text
+        return created.json()[0]["id"]
+
+
+def test_action_bar_sticks_to_the_screen_and_tap_targets_are_big_enough(page, live_server, seeded):
+    """overflow-x: hidden on html/body made the body a scroll box: the bar sat below the fold."""
+    url = live_server["url"]
+    job_id = _expert_job(url, seeded["template_id"], "S-100")
+    _login(page, url, seeded["code"])
+    for height in (915, 520):
+        page.set_viewport_size({"width": 412, "height": height})
+        page.goto(f"{url}/packen/{job_id}")
+        expect(page.locator(".pack-actions")).to_be_visible()
+        bar = page.locator(".pack-actions").bounding_box()
+        assert bar["y"] + bar["height"] <= height + 0.5, (height, bar)
+        assert page.evaluate("window.scrollY") == 0  # without scrolling
+    overflow = page.evaluate("[getComputedStyle(document.documentElement).overflowX, getComputedStyle(document.body).overflowX]")
+    assert overflow == ["clip", "clip"]
+    for selector in (".line-dot", ".pack-nav .btn", ".pack-tools .btn"):
+        for box in [node.bounding_box() for node in page.locator(selector).all()]:
+            assert box["height"] >= 44 and box["width"] >= 44 - 0.5, (selector, box)
+
+
+def test_unsent_answer_survives_a_swipe_and_the_form_is_accessible(page, live_server, seeded, photo_file):
+    url = live_server["url"]
+    job_id = _expert_job(url, seeded["template_id"], "D-400")
+    _login(page, url, seeded["code"])
+    page.goto(f"{url}/packen/{job_id}")
+    expect(page.locator(".pack-line__label")).to_have_text("Kabel")
+    # keyboard access: the photo label is a button, quality toggles carry state
+    photo = page.locator(".photo-button")
+    assert photo.get_attribute("tabindex") == "0" and photo.get_attribute("role") == "button"
+    page.locator(".q-btn--ok").first.click()
+    page.locator(".q-btn--bad").nth(1).click()
+    page.set_input_files("input[type=file]", photo_file)
+    expect(page.locator(".pack-photo")).to_be_visible()
+    photo_src = page.locator(".pack-photo").get_attribute("src")
+
+    # swipe to line 2 and back: nothing was thrown away
+    page.get_by_role("button", name="Weiter ›").click()
+    expect(page.locator(".pack-line__label")).to_have_text("Netzteil")
+    expect(page.get_by_label("Seriennummer 1")).to_be_visible()  # serial input has a label
+    page.get_by_label("Seriennummer 1").fill("SN-1")
+    page.get_by_role("button", name="‹ Zurück").click()
+    expect(page.locator(".pack-line__label")).to_have_text("Kabel")
+    expect(page.locator(".q-btn--ok").first).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".q-btn--bad").nth(1)).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".pack-photo")).to_have_attribute("src", photo_src)  # same blob URL, still alive
+    assert page.evaluate("fetch(document.querySelector('.pack-photo').src).then(r => r.ok)")
+    page.get_by_role("button", name="Weiter ›").click()
+    expect(page.get_by_label("Seriennummer 1")).to_have_value("SN-1")
+
+    # "Zusätzliches Teil" opened from a line: Abbrechen returns to that line, not to the summary
+    page.get_by_role("button", name="Zusätzliches Teil").click()
+    expect(page.get_by_label("Grund")).to_be_visible()
+    page.get_by_role("button", name="Abbrechen").click()
+    expect(page.locator(".pack-line__label")).to_have_text("Netzteil")
+    # ... and from the summary back to the summary
+    page.locator("#pack-strip .line-dot--summary").click()
+    page.get_by_role("button", name="Zusätzliches Teil").click()
+    page.get_by_role("button", name="Abbrechen").click()
+    expect(page.locator(".sum-row")).to_have_count(2)
+
+
+def test_change_mode_shows_previous_answer_and_can_be_cancelled(page, live_server, seeded, photo_file):
+    url = live_server["url"]
+    job_id = _expert_job(url, seeded["template_id"], "E-500")
+    _login(page, url, seeded["code"])
+    page.goto(f"{url}/packen/{job_id}")
+    expect(page.locator(".pack-line__label")).to_have_text("Kabel")
+    for q_ok in page.locator(".q-btn--ok").all():
+        q_ok.click()
+    page.set_input_files("input[type=file]", photo_file)
+    expect(page.locator(".pack-photo")).to_be_visible()
+    page.get_by_role("button", name="In Ordnung", exact=True).click()
+    expect(page.locator("#pack-progress")).to_have_text("1 von 2")
+    page.get_by_role("button", name="‹ Zurück").click()
+    page.get_by_role("button", name="Ändern").click()
+    previous = page.locator(".pack-done--previous")
+    expect(previous).to_contain_text("Bisherige Antwort")
+    expect(previous).to_contain_text("Anna Beispiel")
+    expect(page.locator(".pack-actions")).to_be_visible()
+    previous.get_by_role("button", name="Abbrechen").click()
+    expect(page.locator(".pack-done")).to_be_visible()
+    expect(page.locator(".pack-done--previous")).to_have_count(0)
+    expect(page.locator(".pack-actions")).to_be_hidden()
+    # leaving a line in change mode clears it too
+    page.get_by_role("button", name="Ändern").click()
+    page.get_by_role("button", name="Weiter ›").click()
+    page.get_by_role("button", name="‹ Zurück").click()
+    expect(page.get_by_role("button", name="Ändern")).to_be_visible()
+    expect(page.locator(".pack-done--previous")).to_have_count(0)
+
+
+def test_opening_a_colleagues_job_by_url_asks_before_taking_it_over(browser, live_server, seeded):
+    url = live_server["url"]
+    job_id = _expert_job(url, seeded["template_id"], "K-600")
+    with httpx.Client(base_url=url) as anna:
+        assert anna.post("/api/login/code", json={"code": seeded["code"]}).status_code == 200
+        assert anna.post(f"/api/jobs/{job_id}/claim").status_code == 200
+    with httpx.Client(base_url=url, headers=EXPERT) as api:
+        bert = api.post("/api/expert/workers", json={"name": "Bert Zweiter"}).json()
+    context = browser.new_context(viewport={"width": 412, "height": 915}, has_touch=True, is_mobile=True)
+    page = context.new_page()
+    page.set_default_timeout(8000)
+    try:
+        _login(page, url, bert["badge"]["short_code"])
+        messages = []
+        page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
+        page.goto(f"{url}/packen/{job_id}")
+        page.wait_for_url(f"{url}/auftraege")
+        assert "Anna Beispiel" in messages[0]
+        with httpx.Client(base_url=url, headers=EXPERT) as api:
+            assert api.get(f"/api/jobs/{job_id}").json()["claimed_by_name"] == "Anna Beispiel"
+        page.once("dialog", lambda dialog: dialog.accept())
+        page.goto(f"{url}/packen/{job_id}")
+        expect(page.locator(".pack-line__label")).to_have_text("Kabel")
+        with httpx.Client(base_url=url, headers=EXPERT) as api:
+            assert api.get(f"/api/jobs/{job_id}").json()["claimed_by_name"] == "Bert Zweiter"
+    finally:
+        context.close()
+
+
+def test_long_worker_name_stays_readable_in_the_nav_on_a_narrow_phone(browser, live_server, seeded, tmp_path):
+    url = live_server["url"]
+    with httpx.Client(base_url=url, headers=EXPERT) as api:
+        worker = api.post("/api/expert/workers", json={"name": "Maximilian Mustermann-Schmidt"}).json()
+    context = browser.new_context(viewport={"width": 360, "height": 640}, has_touch=True, is_mobile=True)
+    page = context.new_page()
+    page.set_default_timeout(8000)
+    try:
+        _login(page, url, worker["badge"]["short_code"])
+        expect(page.locator(".nav__user")).to_have_text("Maximilian Mustermann-Schmidt")
+        assert page.evaluate("(() => { const e = document.querySelector('.nav__user'); return e.scrollWidth <= e.clientWidth && e.scrollHeight <= e.clientHeight + 2; })()")
+        expect(page.locator(".nav__brand")).to_be_hidden()
+        expect(page.locator("#nav-logout")).to_be_visible()
+        page.screenshot(path=str(tmp_path / "nav-360.png"))
+    finally:
+        context.close()
+
+
+def test_expert_print_links_keep_the_password_and_expert_can_log_out(browser, live_server, seeded):
+    url = live_server["url"]
+    context = browser.new_context(viewport={"width": 1024, "height": 800})
+    page = context.new_page()
+    page.set_default_timeout(8000)
+    try:
+        page.goto(f"{url}/experte")
+        page.fill("#password-input", PASSWORD)
+        page.click("#login-form button[type=submit]")
+        page.click("#tab-btn-mitarbeiter")
+        with page.expect_popup() as popup:
+            page.get_by_role("link", name="Ausweis drucken").first.click()
+        badge = popup.value
+        badge.wait_for_load_state()
+        expect(badge.locator("#badge-view")).to_be_visible()
+        expect(badge.locator("#login-form")).to_be_hidden()
+        # the job label opens the same way
+        page.click("#tab-btn-auftraege")
+        with page.expect_popup() as popup:
+            page.get_by_role("link", name="Etikett").first.click()
+        label = popup.value
+        label.wait_for_load_state()
+        expect(label.locator("#label-view")).to_be_visible()
+        expect(label.locator("#login-form")).to_be_hidden()
+        # "Abmelden" forgets the password and shows the login again
+        page.get_by_role("button", name="Abmelden").click()
+        expect(page.locator("#login-form")).to_be_visible()
+        expect(page.locator("#app-view")).to_be_hidden()
+        assert page.evaluate("sessionStorage.getItem('galochka.expertPassword')") is None
+    finally:
+        context.close()

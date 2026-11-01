@@ -35,6 +35,7 @@ REQUIRED_KEYS = {
     "error.not_found",
     "error.too_large",
     "error.bad_image",
+    "error.no_qr",
     "error.session_expired",
     "error.generic",
     "error.badge_unknown",
@@ -118,7 +119,8 @@ def test_worker_pages_check_the_session_and_redirect_to_login(client):
     assert "C.loadMe()" in client.get("/anmelden").text
     assert "C.goLogin()" not in client.get("/anmelden").text
     assert "C.loadMe()" not in client.get("/experte").text
-    assert "C.loadMe()" not in client.get("/druck/badge/1").text
+    # the print pages show the logged-in worker if there is one (no redirect: the office PC has no session)
+    assert "C.loadMe()" in client.get("/druck/badge/1").text and "C.goLogin()" not in client.get("/druck/badge/1").text
 
 
 def test_anmelden_page_has_scan_button_and_code_form(client):
@@ -486,9 +488,9 @@ def test_rma_page_markup(client):
         assert f'id="{element_id}"' in html, element_id
     # all four stages are handled; the outgoing hand-off goes to Packen
     for needle in ("/repair-notes", "/api/repair-notes/", "/outgoing", '"/packen/"', '"/pruefen/"',
-                   '"/druck/etikett/"', "Lines.itemPicker", "Lines.mount"):
+                   '"/druck/etikett/"', "C.itemPicker", "Lines.mount"):
         assert needle in html, needle
-    assert 'el("details"' in html and 'el("summary"' in html
+    assert 'el("details"' in html and 'el("summary"' in html and "C.el" in html
     # intake actions are relabelled through string keys, never hard-coded German
     for key in ("rma.in_ok", "rma.in_missing", "rma.in_notok", "rma.in_extra", "rma.in_finish", "rma.prepare",
                 "rma.act_replaced", "rma.act_kept", "rma.add_part", "rma.note_delete"):
@@ -583,3 +585,72 @@ def test_experte_export_tab_markup(client):
     assert "/api/expert/export.csv?" in html and "blob: true" in html
     assert "URL.createObjectURL" in html and "link.download" in html and "URL.revokeObjectURL" in html
     assert "90 * 24" in html  # default range: last 90 days
+
+
+def _luminance(hex_color: str) -> float:
+    r, g, b = (int(hex_color.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    hi, lo = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_button_and_badge_text_has_enough_contrast_in_light_and_dark():
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    light = dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6});", css.split("@media (prefers-color-scheme: dark)")[0]))
+    dark_block = css.split("@media (prefers-color-scheme: dark)")[1].split("}")[0]
+    dark = {**light, **dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6});", dark_block))}
+    for theme, tokens in (("light", light), ("dark", dark)):
+        for colour in ("brand", "green", "yellow", "red"):
+            ratio = _contrast(tokens[colour], tokens[f"{colour}-ink"])
+            assert ratio >= 4.5, (theme, colour, round(ratio, 2))
+        # coloured text on the page surface (danger buttons, tags, links)
+        for colour in ("brand", "red"):
+            assert _contrast(tokens[colour], tokens["surface"]) >= 4.5, (theme, colour)
+    assert dark["brand-ink"] != light["brand-ink"]  # dark brand is light: its text must be dark
+
+
+def test_sticky_action_bar_is_not_trapped_by_overflow_hidden():
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    for selector in ("html", "body"):
+        block = re.search(rf"^{selector} \{{(.*?)\}}", css, re.S | re.M).group(1)
+        assert "overflow-x: clip" in block, selector
+    assert "overflow-x: hidden;\n  overflow-x: clip" in css  # hidden only as the fallback before clip
+    for dead in (".card--green", ".card--red", ".card--yellow", ".card__score", ".card__thumb", ".job-hint"):
+        assert dead not in css, dead
+
+
+def test_shared_helpers_live_in_app_js_once():
+    app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    for name in ("el", "clearNode", "button", "reportError", "itemPicker", "field", "keyboardLabel"):
+        assert re.search(rf"\b{name}: {name}\b", app_js), name
+    for path in STATIC_DIR.glob("*.html"):
+        text = path.read_text(encoding="utf-8")
+        for helper in ("function clearNode", "function el(", "function button("):
+            assert helper not in text, (path.name, helper)
+    assert "function clearNode" not in (STATIC_DIR / "lines.js").read_text(encoding="utf-8")
+    # one item picker: the expert page only adapts it (its own search goes through the expert password)
+    experte = (STATIC_DIR / "experte.html").read_text(encoding="utf-8")
+    assert "C.itemPicker(" in experte and "item-picker__option" not in experte
+
+
+def test_expert_print_links_keep_the_opener_so_the_password_follows():
+    html = (STATIC_DIR / "experte.html").read_text(encoding="utf-8")
+    for needle in ('id="worker-created-print" class="btn btn--secondary" target="_blank" rel="opener"',
+                   'print.rel = "opener"', 'label.rel = "opener"'):
+        assert needle in html, needle
+    assert 'id="expert-logout"' in html
+    # the truncated-listing warning of the item sync is rendered, not dropped
+    assert 'id="items-sync-warning"' in html and "result.warning" in html
+
+
+def test_wording_fixes():
+    strings = _strings()
+    assert strings["jobs.ship"] == "Als versendet markieren"
+    assert strings["check.reject_send"] == "Zurückschicken"
+    assert strings["expert.tpl_second_check"] == "Prüfung durch zweite Person"
+    assert "Zweite Kontrolle" not in " ".join(strings.values())
+    assert strings["error.no_qr"].startswith("Kein QR-Code erkannt")

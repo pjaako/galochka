@@ -176,6 +176,10 @@ def test_rma_flow_intake_repair_outgoing_check_and_label(browser, live_server, s
         expect(page.get_by_role("button", name="Beschädigt", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name="Weiteres Teil gefunden", exact=True)).to_be_visible()
         assert _job(url, job_id)["claimed_by_name"] == "Anna Annahme"
+        page.set_viewport_size({"width": 412, "height": 520})  # the action bar stays on the screen
+        bar = page.locator(".pack-actions").bounding_box()
+        assert bar["y"] + bar["height"] <= 520.5, bar
+        page.set_viewport_size({"width": 412, "height": 915})
         page.screenshot(path=str(tmp_path / "rma-intake.png"))
         assert (tmp_path / "rma-intake.png").stat().st_size > 1000
 
@@ -278,6 +282,7 @@ def test_rma_flow_intake_repair_outgoing_check_and_label(browser, live_server, s
     try:
         _login(page, url, seeded["bert"])
         page.goto(f"{url}/pruefen/{job_id}")
+        expect(page.locator("#chk-order")).to_have_text("RMA R-1 – Rücksendung")  # same heading as on Packen
         expect(page.locator(".chk-row")).to_have_count(1)
         expect(page.locator(".chk-row")).to_contain_text("Platine")
         page.set_input_files("input[type=file]", box_photo)
@@ -322,7 +327,7 @@ def test_rma_flow_intake_repair_outgoing_check_and_label(browser, live_server, s
         card = page.locator(f'.card[data-job-id="{job_id}"]')
         expect(card).to_contain_text("RMA R-1")
         expect(card).to_contain_text("Geprüft")
-        expect(card.get_by_role("button", name="Versendet")).to_be_visible()
+        expect(card.get_by_role("button", name="Als versendet markieren")).to_be_visible()
         expect(card.get_by_role("link", name="Etikett")).to_have_attribute("href", f"/druck/etikett/{job_id}")
     finally:
         context.close()
@@ -367,6 +372,14 @@ def test_repair_view_added_part_delete_and_empty_return(browser, live_server, se
     context, page = _mobile_page(browser)
     try:
         _login(page, url, seeded["bert"])  # a colleague opens the RMA: takes it over, sees but cannot delete notes
+        # opening the link of a colleague's RMA asks first; cancelling leaves it with Anna and goes back to the list
+        messages = []
+        page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
+        page.goto(f"{url}/rma/{job_id}")
+        page.wait_for_url(f"{url}/auftraege")
+        assert "Anna" in messages[0] and "übernehmen" in messages[0]
+        assert _job(url, job_id)["claimed_by_name"] == "Anna Annahme"
+        page.once("dialog", lambda dialog: dialog.accept())
         page.goto(f"{url}/rma/{job_id}")
         expect(page.locator("#rma-preview")).to_have_text("Rücksendung: nichts")
         expect(page.locator("#rma-outgoing .note")).to_contain_text("im Expertenbereich stornieren")

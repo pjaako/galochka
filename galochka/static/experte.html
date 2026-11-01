@@ -18,6 +18,7 @@
     <h1 data-i18n="expert.title"></h1>
 
     <form id="login-form" class="login-form">
+      <label class="sr-only" for="password-input" data-i18n="expert.password_placeholder"></label>
       <input type="password" id="password-input" class="input-id" data-i18n-placeholder="expert.password_placeholder"
         autocomplete="off">
       <button type="submit" class="btn btn--primary" data-i18n="expert.login"></button>
@@ -32,6 +33,7 @@
         <button type="button" class="tab-btn" id="tab-btn-einstellungen" data-tab="einstellungen" aria-pressed="false" data-i18n="expert.tab_einstellungen"></button>
         <button type="button" class="tab-btn" id="tab-btn-berichte" data-tab="berichte" aria-pressed="false" data-i18n="expert.tab_berichte"></button>
         <button type="button" class="tab-btn" id="tab-btn-export" data-tab="export" aria-pressed="false" data-i18n="expert.tab_export"></button>
+        <button type="button" class="tab-btn tab-btn--end" id="expert-logout" data-i18n="nav.logout"></button>
       </div>
 
       <!-- Later tasks fill these sections (Mitarbeiter: T3, Vorlagen: T4, ...). -->
@@ -44,6 +46,7 @@
           <p class="field__help" data-i18n="expert.items_sync_help"></p>
           <button type="button" id="items-sync-btn" class="btn btn--primary" data-i18n="expert.items_sync"></button>
           <p id="items-sync-result" class="field__help" role="status"></p>
+          <p id="items-sync-warning" class="note" role="alert" hidden></p>
         </div>
 
         <form id="items-csv-form" class="settings-section">
@@ -227,7 +230,7 @@
         </form>
         <div id="worker-created" class="note worker-created" role="status" hidden>
           <p id="worker-created-text"></p>
-          <a id="worker-created-print" class="btn btn--secondary" target="_blank" rel="noopener"
+          <a id="worker-created-print" class="btn btn--secondary" target="_blank" rel="opener"
             data-i18n="expert.worker_print"></a>
         </div>
 
@@ -374,7 +377,7 @@
       var passwordInput = document.getElementById("password-input");
       var appView = document.getElementById("app-view");
 
-      var tabButtons = document.querySelectorAll(".tab-btn");
+      var tabButtons = document.querySelectorAll(".tab-btn[data-tab]");
       var tabNames = ["artikel", "vorlagen", "auftraege", "mitarbeiter", "einstellungen", "berichte", "export"];
 
       var settingsForm = document.getElementById("settings-form");
@@ -386,7 +389,7 @@
         // expertApi() already shows expert.wrong_password and clears the stored
         // password on 401; avoid a second, redundant toast here.
         if (err && err.status === 401) return;
-        C.toast((err && err.detail) || C.t("error.generic"));
+        C.reportError(err);
       }
 
       function showLogin() {
@@ -433,6 +436,7 @@
       var itemsCassandra = document.getElementById("items-cassandra");
       var itemsSyncBtn = document.getElementById("items-sync-btn");
       var itemsSyncResult = document.getElementById("items-sync-result");
+      var itemsSyncWarning = document.getElementById("items-sync-warning");
       var itemsCsvForm = document.getElementById("items-csv-form");
       var itemsCsvFile = document.getElementById("items-csv-file");
       var itemsCsvBtn = document.getElementById("items-csv-btn");
@@ -469,9 +473,15 @@
       itemsSyncBtn.addEventListener("click", async function () {
         itemsSyncBtn.disabled = true;
         itemsSyncResult.textContent = C.t("expert.items_sync_running");
+        itemsSyncWarning.hidden = true;
         try {
           var result = await expertApi("/api/expert/sync/items", { method: "POST" });
           itemsSyncResult.textContent = itemsResultText(result);
+          // The listing from Cassandra was cut off: nothing was deactivated, the expert must know.
+          if (result.warning) {
+            itemsSyncWarning.textContent = result.warning;
+            itemsSyncWarning.hidden = false;
+          }
         } catch (err) {
           itemsSyncResult.textContent = "";
           reportError(err);
@@ -571,7 +581,8 @@
           print.className = "btn btn--secondary";
           print.href = "/druck/badge/" + worker.id;
           print.target = "_blank";
-          print.rel = "noopener";
+          // same origin: the print tab inherits the expert password from sessionStorage (needs the opener)
+          print.rel = "opener";
           print.textContent = C.t("expert.worker_print");
           actions.appendChild(print);
         }
@@ -666,103 +677,17 @@
       });
 
       // --- Artikelsuche (Vorlagen-Editor and BOM-Import) ----------------------------------
-      function clearNode(el) {
-        while (el.firstChild) el.removeChild(el.firstChild);
-      }
+      var clearNode = C.clearNode;
 
-      function itemLabel(id, name) {
-        return name ? id + " – " + name : id;
-      }
-
-      // Text input with a small dropdown fed by GET /api/items?q=. `initial` is {id, name} or null.
-      // The chosen item id is only set by picking from the list; editing the text clears it.
-      function makeItemPicker(initial) {
-        var wrap = document.createElement("div");
-        wrap.className = "item-picker";
-        var input = document.createElement("input");
-        input.type = "text";
-        input.className = "input-id";
-        input.setAttribute("autocomplete", "off");
-        input.setAttribute("placeholder", C.t("expert.tpl_item_placeholder"));
-        var list = document.createElement("div");
-        list.className = "item-picker__list";
-        list.hidden = true;
-        wrap.appendChild(input);
-        wrap.appendChild(list);
-
-        var picked = null;
-        var seq = 0;
-        var timer = null;
-
-        function hideList() {
-          seq += 1;
-          list.hidden = true;
-          clearNode(list);
-        }
-
-        function pick(item) {
-          picked = item;
-          input.value = item ? itemLabel(item.id, item.name) : "";
-          hideList();
-        }
-
-        function showResults(items) {
-          clearNode(list);
-          if (!items.length) {
-            var none = document.createElement("div");
-            none.className = "item-picker__none";
-            none.textContent = C.t("expert.tpl_item_none");
-            list.appendChild(none);
-          }
-          items.forEach(function (item) {
-            var btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "item-picker__option";
-            btn.textContent = itemLabel(item.item_id, item.name);
-            // mousedown (not click) so the input does not lose focus first
-            btn.addEventListener("mousedown", function (event) {
-              event.preventDefault();
-              pick({ id: item.item_id, name: item.name });
-            });
-            list.appendChild(btn);
-          });
-          list.hidden = false;
-        }
-
-        async function search() {
-          var q = input.value.trim();
-          seq += 1;
-          var mine = seq;
-          if (!q) {
-            hideList();
-            return;
-          }
-          var items;
-          try {
-            items = await expertApi("/api/items?q=" + encodeURIComponent(q) + "&limit=10");
-          } catch (err) {
-            return;
-          }
-          if (mine !== seq) return;
-          showResults(items);
-        }
-
-        input.addEventListener("input", function () {
-          picked = null;
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(search, 250);
+      // Text input with a small dropdown fed by GET /api/items?q= (C.itemPicker, authenticated with the
+      // expert password). `initial` is {id, name} or null. The chosen item id is only set by picking from
+      // the list; editing the text clears it.
+      function makeItemPicker(initial, labelKey) {
+        return C.itemPicker({
+          initial: initial,
+          fetch: expertApi,
+          label: C.t(labelKey || "expert.tpl_line_item"),
         });
-        input.addEventListener("blur", function () {
-          setTimeout(hideList, 150);
-        });
-        if (initial && initial.id) pick(initial);
-
-        return {
-          el: wrap,
-          getId: function () { return picked ? picked.id : null; },
-          // true when the field is empty (no item) or an item was picked from the list
-          isValid: function () { return input.value.trim() === "" || picked !== null; },
-        };
       }
 
       // --- Vorlagen ----------------------------------------------------------------------
@@ -1099,7 +1024,8 @@
         tplNameInput.value = template ? template.name : "";
         clearNode(tplProduct);
         tplProductPicker = makeItemPicker(
-          template && template.product_item_id ? { id: template.product_item_id, name: template.product_name } : null
+          template && template.product_item_id ? { id: template.product_item_id, name: template.product_name } : null,
+          "expert.tpl_product"
         );
         tplProduct.appendChild(tplProductPicker.el);
         tplSecondCheck.value = template && template.second_check !== null ? (template.second_check ? "1" : "0") : "";
@@ -1232,7 +1158,8 @@
           bomNameInput.value = data.bom_name || data.bom_number;
           clearNode(bomProduct);
           bomProductPicker = makeItemPicker(
-            data.product_known ? { id: data.product_item_id, name: data.product_name } : null
+            data.product_known ? { id: data.product_item_id, name: data.product_name } : null,
+            "expert.bom_product"
           );
           bomProduct.appendChild(bomProductPicker.el);
           bomModeNew.checked = true;
@@ -1374,12 +1301,14 @@
         if (jobTemplate.value !== chosen) await loadJobCustomisation();
       }
 
-      function jobLabeledInput(placeholderKey, type) {
+      // Input with a placeholder and a visually hidden <label> (appended to `parent`) for screen readers.
+      function jobLabeledInput(placeholderKey, type, parent) {
         var input = document.createElement("input");
         input.type = type || "text";
         input.className = "input-id";
         input.setAttribute("autocomplete", "off");
         input.setAttribute("placeholder", C.t(placeholderKey));
+        parent.appendChild(C.hiddenLabel(input, C.t(placeholderKey)));
         return input;
       }
 
@@ -1411,7 +1340,7 @@
           text.textContent = line.qty + " × " + line.label + " – " + C.t("expert.job_omit");
           head.appendChild(omit);
           head.appendChild(text);
-          var reason = jobLabeledInput("expert.job_omit_reason");
+          var reason = jobLabeledInput("expert.job_omit_reason", "text", row);
           reason.maxLength = 200;
           reason.hidden = true;
           omit.addEventListener("change", function () { reason.hidden = !omit.checked; });
@@ -1425,14 +1354,14 @@
       function addJobExtra() {
         var wrap = document.createElement("div");
         wrap.className = "tpl-line";
-        var picker = makeItemPicker(null);
-        var label = jobLabeledInput("expert.job_extra_label");
+        var picker = makeItemPicker(null, "pack.extra_item");
+        var label = jobLabeledInput("expert.job_extra_label", "text", wrap);
         label.maxLength = 120;
-        var qty = jobLabeledInput("expert.job_extra_qty", "number");
+        var qty = jobLabeledInput("expert.job_extra_qty", "number", wrap);
         qty.min = "1";
         qty.max = "999";
         qty.value = "1";
-        var reason = jobLabeledInput("expert.job_extra_reason");
+        var reason = jobLabeledInput("expert.job_extra_reason", "text", wrap);
         reason.maxLength = 200;
         var remove = workerButton("expert.job_extra_remove", function () {
           jobExtras.removeChild(wrap);
@@ -1531,7 +1460,7 @@
         label.className = "btn btn--secondary";
         label.href = "/druck/etikett/" + job.id;
         label.target = "_blank";
-        label.rel = "noopener";
+        label.rel = "opener"; // same origin: the label tab inherits the expert password
         label.textContent = C.t("expert.job_label");
         actions.appendChild(label);
         row.appendChild(actions);
@@ -1638,12 +1567,7 @@
       var repQuery = "";
       var repLoaded = 0;
 
-      function repEl(tag, className, text) {
-        var node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined && text !== null) node.textContent = text;
-        return node;
-      }
+      var repEl = C.el;
 
       function repCell(row, text) {
         var td = repEl("td", "", text);
@@ -1767,7 +1691,7 @@
 
       function qualityText(quality) {
         return Object.keys(quality || {}).map(function (point) {
-          return point + "=" + C.t(quality[point] === "ok" ? "export.quality_ok" : "export.quality_not_ok");
+          return point + ": " + C.t(quality[point] === "ok" ? "reports.quality_ok" : "reports.quality_not_ok");
         }).join(", ");
       }
 
@@ -2089,6 +2013,13 @@
         } catch (err) {
           reportError(err);
         }
+      });
+
+      // "Abmelden": forget the expert password on this tab and show the login again.
+      document.getElementById("expert-logout").addEventListener("click", function () {
+        C.clearExpertPassword();
+        switchTab("artikel");
+        showLogin();
       });
 
       tabButtons.forEach(function (btn) {

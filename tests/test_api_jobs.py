@@ -280,7 +280,7 @@ def test_job_detail_shape(client, worker_client, make_image):
     assert (line["label"], line["qty"], line["photo_required"], line["serial_required"], line["source"]) == (
         "Kabel", 2, True, False, "template",
     )
-    assert line["quality_points"] == ["sauber", "unbeschädigt", "funktion"]
+    assert line["quality_points"] == ["sauber", "unbeschädigt", "Funktion geprüft"]
     assert worker.get("/api/jobs/9999").status_code == 404
 
 
@@ -409,14 +409,14 @@ def test_confirm_with_image_stores_normalised_jpeg(client, worker_client, make_i
     job = _packing_job(client, worker)
     line = job["lines"][0]
     big = make_image(size=(3000, 2000), orientation=6)
-    resp = _confirm(worker, line, image=big, quality={"sauber": "ok", "unbeschädigt": "ok", "funktion": "ok"}, reason="  ")
+    resp = _confirm(worker, line, image=big, quality={"sauber": "ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"}, reason="  ")
     assert resp.status_code == 201, resp.text
     body = resp.json()
     conf = body["confirmation"]
     assert (conf["result"], conf["qty"], conf["attempt"], conf["worker_id"], conf["worker_name"]) == (
         "ok", 2, 1, me["id"], "Anna",
     )
-    assert conf["quality"] == {"sauber": "ok", "unbeschädigt": "ok", "funktion": "ok"} and conf["serials"] == []
+    assert conf["quality"] == {"sauber": "ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"} and conf["serials"] == []
     assert conf["photo_url"].startswith(f"/photos/jobs/{job['id']}/") and conf["photo_url"].endswith(".jpg")
     assert body["line"]["id"] == line["id"] and body["line"]["latest"]["id"] == conf["id"]
     stored = Path(data_dir) / "photos" / conf["photo_url"].removeprefix("/photos/")
@@ -507,7 +507,7 @@ def test_confirm_not_ok_needs_reason_and_photo(client, worker_client, make_image
     assert _confirm(worker, line, result="not_ok", image=make_image()).status_code == 400
     assert _confirm(worker, line, result="not_ok", reason="Kratzer").status_code == 400
     resp = _confirm(worker, line, result="not_ok", reason="Kratzer", image=make_image(),
-                    quality={"sauber": "not_ok", "unbeschädigt": "ok", "funktion": "ok"})
+                    quality={"sauber": "not_ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"})
     assert resp.status_code == 201 and resp.json()["confirmation"]["result"] == "not_ok"
 
 
@@ -527,7 +527,7 @@ def test_confirm_quality_rules(client, worker_client, make_image):
     worker, _ = worker_client
     line = _packing_job(client, worker)["lines"][0]
     image = make_image()
-    resp = _confirm(worker, line, image=image, quality={"sauber": "ok", "funktion": "not_ok"})
+    resp = _confirm(worker, line, image=image, quality={"sauber": "ok", "Funktion geprüft": "not_ok"})
     assert resp.status_code == 400 and "Qualitätspunkt" in resp.json()["detail"]
     assert _confirm(worker, line, image=image, quality={"unbekannt": "ok"}).status_code == 400
     assert _confirm(worker, line, image=image, quality={"sauber": "vielleicht"}).status_code == 400
@@ -758,3 +758,24 @@ def test_expert_job_list_defaults_to_unfinished_jobs_newest_first(client):
     assert len(client.get(JOBS, headers=EXPERT, params={"limit": 1}).json()) == 1
     assert client.get(JOBS, headers=EXPERT, params={"status": "bogus"}).status_code == 400
     assert client.get(JOBS, headers=EXPERT, params={"kind": "bogus"}).status_code == 400
+
+
+def test_job_list_carries_attempt_reject_note_and_packer_ids(client, new_worker_client, make_image):
+    packer, anna = new_worker_client("Anna")
+    checker, _ = new_worker_client("Bert")
+    job = _packing_job(client, packer)
+    listed = {j["id"]: j for j in packer.get("/api/jobs").json()}[job["id"]]
+    assert (listed["attempt"], listed["last_reject_note"], listed["last_reject_by"], listed["packer_ids"]) == (
+        1, None, None, [])
+
+    _confirm_all(packer, job, make_image())
+    assert packer.post(f"/api/jobs/{job['id']}/finish").json()["status"] == "packed"
+    listed = {j["id"]: j for j in packer.get("/api/jobs").json()}[job["id"]]
+    assert listed["packer_ids"] == [anna["id"]]  # the list can hide "Prüfen" from the packer
+
+    resp = checker.post(f"/api/jobs/{job['id']}/check", data={"result": "rejected", "note": "Kabel verkratzt"})
+    assert resp.status_code == 201, resp.text
+    listed = {j["id"]: j for j in packer.get("/api/jobs").json()}[job["id"]]
+    assert listed["status"] == "packing" and listed["attempt"] == 2
+    assert (listed["last_reject_by"], listed["last_reject_note"]) == ("Bert", "Kabel verkratzt")
+    assert listed["packer_ids"] == []

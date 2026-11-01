@@ -103,20 +103,9 @@
       var filterMine = document.getElementById("filter-mine");
       var templatesLoaded = false;
 
-      function reportError(err) {
-        C.toast((err && err.detail) || C.t("error.generic"));
-      }
-
-      function clearNode(el) {
-        while (el.firstChild) el.removeChild(el.firstChild);
-      }
-
-      function el(tag, className, text) {
-        var node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-      }
+      var reportError = C.reportError;
+      var clearNode = C.clearNode;
+      var el = C.el;
 
       function tag(text, className) {
         return el("span", "tag" + (className ? " " + className : ""), text);
@@ -167,7 +156,9 @@
         if (job.status === "open" || (job.status === "packing" && job.kind === "delivery")) {
           box.appendChild(actionButton(C.t("jobs.pack"), "btn--primary", function () { startPacking(job); }));
         } else if (job.status === "packed") {
-          box.appendChild(actionLink(C.t("jobs.check"), "btn--primary", "/pruefen/" + job.id));
+          // The packer may not check the own box: no "Prüfen" for them (the server enforces it too).
+          var ownBox = me && (job.packer_ids || []).indexOf(me.id) !== -1;
+          if (!ownBox) box.appendChild(actionLink(C.t("jobs.check"), "btn--primary", "/pruefen/" + job.id));
         } else if (job.status === "intake") {
           box.appendChild(actionLink(C.t("jobs.rma_intake"), "btn--primary", "/rma/" + job.id));
         } else if (job.status === "repair") {
@@ -200,10 +191,18 @@
         body.appendChild(el("div", "card__meta", meta.join(" · ")));
         var tags = el("div", "job-tags");
         tags.appendChild(tag(C.t("status." + job.status), "tag--status"));
+        // Sent back by the second check: whoever packs next sees it before opening the job.
+        var sentBack = job.attempt > 1 && job.last_reject_note && (job.status === "packing" || job.status === "outgoing");
+        if (sentBack) tags.appendChild(tag(C.t("jobs.rejected"), "tag--bad"));
         if (job.ad_hoc) tags.appendChild(tag(C.t("jobs.ad_hoc"), ""));
         if (job.claimed_by_name) tags.appendChild(tag(C.fmt(C.t("jobs.claimed_by"), { name: job.claimed_by_name }), ""));
         tags.appendChild(tag(C.fmt(C.t("jobs.progress"), { done: job.lines_done, total: job.lines_total }), ""));
         body.appendChild(tags);
+        if (sentBack) {
+          body.appendChild(el("div", "card__reject", C.fmt(C.t("pack.rejected_by"), {
+            name: job.last_reject_by || "", note: job.last_reject_note,
+          })));
+        }
         card.appendChild(body);
         card.appendChild(actionsFor(job));
         return card;

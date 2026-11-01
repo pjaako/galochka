@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-01
+Updated: 2026-11-01 (end of session)
 
 ## Done
 - 2026-11-01: brainstorm with the owner (four rounds of questions), design reviewed by
@@ -70,5 +70,20 @@ Updated: 2026-11-01
   repair note, formula-injection guard). Berichte and Export tabs; RMA creation enabled in
   the expert form. Suite: 668 passed, 2 skipped.
 
+- T9 (2026-11-01): hardening. README and HANDOFF written. Two independent whole-branch
+  reviews (backend: 14 findings, none critical; front-end driven in Chromium: 22 findings,
+  6 major) and two fix waves, all findings closed with tests: generated RMA lines not
+  deletable, cache-only job detail after a bounded Cassandra prefetch, truncated sync never
+  deactivates, image bombs rejected, huge ids, intake lines with notes locked, kept+replaced
+  bound, local time in reports/export, permissions tightened; sticky action bar, rejection
+  banner for the packer, drafts survive swipes, label text never clips the order number,
+  print tabs keep the expert password, dark-mode contrast ≥ 4.5:1, shared helpers in
+  app.js, accessibility labels, wording unified. Note: `--brand` is now #0078bd (was ACS
+  #007cc5) for contrast; owner may revert. Suite: 733 passed, 3 skipped (sqlite3 CLI).
+
 ## Next
-- T9 Hardening: whole-branch review, fix wave, README, HANDOFF, walkthrough.
+- Owner acceptance: deploy on the galochka LXC (`sudo bash deploy/install.sh`), set
+  `GALOCHKA_CASSANDRA_URL`, sync items, import `bom_example.csv`, print one badge on the
+  Dymo, pack one real set on a phone, run one RMA. Then merge the branch into `main`.
+- Backlog: see `docs/HANDOFF.md` section 8 (photo retention, code-login rate limit,
+  Cassandra paging).

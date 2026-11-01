@@ -579,7 +579,7 @@ MIN_REASON = 3
 MAX_SERIAL = 64
 MAX_UNITS = 20
 MAX_CUSTOMISATIONS = 50
-_BUILTIN_QUALITY_POINTS = ["sauber", "unbeschädigt", "funktion"]
+_BUILTIN_QUALITY_POINTS = ["sauber", "unbeschädigt", "Funktion geprüft"]
 
 # Statuses in which lines can be confirmed or added, per job kind. The stage of the line
 # must equal current_stage(job).
@@ -681,6 +681,7 @@ def job_to_dict(row) -> dict:
         "kind": row["kind"],
         "status": row["status"],
         "stage": row["stage"],
+        "attempt": row["attempt"],
         "order_ref": row["order_ref"],
         "customer": row["customer"],
         "template_id": row["template_id"],
@@ -698,6 +699,35 @@ def job_to_dict(row) -> dict:
         "lines_total": row["lines_total"],
         "lines_done": row["lines_done"],
     }
+
+
+def job_list_dicts(conn: sqlite3.Connection, rows) -> list[dict]:
+    """job_to_dict for the job list, plus what the list needs without a request per job.
+
+    last_reject_by / last_reject_note: the latest rejected second check (None when there was none);
+    packer_ids: who confirmed lines of the current attempt, only filled for packed jobs (the ones a
+    second check is offered for), so the list can hide "Prüfen" from the packer.
+    """
+    rows = list(rows)
+    rejects: dict[int, tuple[str, str]] = {}
+    if rows:
+        marks = ",".join("?" * len(rows))
+        for r in conn.execute(
+            "SELECT k.job_id, k.note, w.name FROM checks k JOIN workers w ON w.id = k.worker_id"
+            " WHERE k.result = 'rejected' AND k.job_id IN (" + marks + ")"
+            " AND k.id = (SELECT MAX(x.id) FROM checks x WHERE x.job_id = k.job_id AND x.result = 'rejected')",
+            [row["id"] for row in rows],
+        ):
+            rejects[r["job_id"]] = (r["name"], r["note"])
+    out = []
+    for row in rows:
+        data = job_to_dict(row)
+        by, note = rejects.get(row["id"], (None, None))
+        data["last_reject_by"] = by
+        data["last_reject_note"] = note
+        data["packer_ids"] = [r["id"] for r in current_confirmers(conn, row)] if row["status"] == "packed" else []
+        out.append(data)
+    return out
 
 
 def _casefold(value):

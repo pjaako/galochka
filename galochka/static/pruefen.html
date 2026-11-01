@@ -37,7 +37,7 @@
 
       var me = null;
       var job = null; // GET /api/jobs/{id}
-      var view = "review"; // "review" | "reject" | "released" | "other" (status is not packed)
+      var view = "review"; // "review" | "reject" | "rejected" | "released" | "other" (status is not packed)
       var busy = false;
       var locked = false; // the server said same_worker: the actions stay off
       var boxPhoto = null; // File of the box photo
@@ -55,27 +55,10 @@
       var bodyEl = document.getElementById("chk-body");
       var actionsEl = document.getElementById("chk-actions");
 
-      function reportError(err) {
-        C.toast((err && err.detail) || C.t("error.generic"));
-      }
-
-      function clearNode(node) {
-        while (node.firstChild) node.removeChild(node.firstChild);
-      }
-
-      function el(tagName, className, text) {
-        var node = document.createElement(tagName);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-      }
-
-      function button(label, className, onClick) {
-        var btn = el("button", "btn " + (className || ""), label);
-        btn.type = "button";
-        if (onClick) btn.addEventListener("click", onClick);
-        return btn;
-      }
+      var reportError = C.reportError;
+      var clearNode = C.clearNode;
+      var el = C.el;
+      var button = C.button;
 
       function setBusy(value) {
         busy = value;
@@ -153,8 +136,11 @@
 
       function renderHead() {
         headEl.hidden = false;
-        orderEl.textContent = job.order_ref + (job.customer ? " – " + job.customer : "");
-        var meta = [job.template_name];
+        var rma = job.kind === "rma";
+        orderEl.textContent = rma
+          ? C.fmt(C.t("rma.head_outgoing"), { ref: job.order_ref })
+          : job.order_ref + (job.customer ? " – " + job.customer : "");
+        var meta = rma ? [job.customer, job.template_name].filter(Boolean) : [job.template_name];
         if (job.unit_count > 1) meta.push(C.fmt(C.t("pack.carton"), { n: job.unit_no, total: job.unit_count }));
         metaEl.textContent = meta.join(" · ");
         var packers = job.packer_names || [];
@@ -207,6 +193,7 @@
           renderBoxPhoto(wrap);
         });
         label.appendChild(input);
+        C.keyboardLabel(label, input);
         wrap.appendChild(label);
         wrap.appendChild(el("p", "pack-photo-hint", "★ " + C.t("check.box_photo_required")));
       }
@@ -217,20 +204,24 @@
         var list = el("div", "sum-list");
         (job.lines || []).forEach(function (line, i) { list.appendChild(lineRow(line, i)); });
         box.appendChild(list);
-        var boxBlock = el("div", "chk-box");
-        boxBlock.appendChild(el("h2", "pack-line__label", C.t("check.box_title")));
-        var wrap = el("div", "chk-box__photo");
-        boxBlock.appendChild(wrap);
-        renderBoxPhoto(wrap);
-        box.appendChild(boxBlock);
+        if (!locked) {
+          // The packer cannot release the own box, so there is no point in asking for its photo.
+          var boxBlock = el("div", "chk-box");
+          boxBlock.appendChild(el("h2", "pack-line__label", C.t("check.box_title")));
+          var wrap = el("div", "chk-box__photo");
+          boxBlock.appendChild(wrap);
+          renderBoxPhoto(wrap);
+          box.appendChild(boxBlock);
+        }
         bodyEl.appendChild(box);
       }
 
       function renderReject() {
         var box = el("div", "pack-panel pack-panel--bad");
         box.appendChild(el("p", "pack-block__title", C.t("check.reject_title")));
-        var area = el("textarea");
+        var area = el("textarea", "input-id");
         area.rows = 4;
+        area.setAttribute("aria-label", C.t("check.reject_placeholder"));
         area.id = "chk-reject-note";
         area.setAttribute("data-reason", "");
         area.placeholder = C.t("check.reject_placeholder");
@@ -246,6 +237,18 @@
         var back = el("a", "btn btn--primary", C.t("pack.to_overview"));
         back.href = "/auftraege";
         box.appendChild(back);
+        bodyEl.appendChild(box);
+      }
+
+      // After a reject the checker is done with this box: same end view as after a release.
+      function renderRejected() {
+        var box = el("div", "pack-result pack-result--check");
+        box.id = "chk-rejected";
+        box.appendChild(el("p", "", C.t("check.rejected")));
+        var overview = el("a", "btn btn--primary", C.t("pack.to_overview"));
+        overview.href = "/auftraege";
+        box.appendChild(overview);
+        box.appendChild(button(C.t("pack.logout_done"), "btn--secondary", function () { C.logout(); }));
         bodyEl.appendChild(box);
       }
 
@@ -296,6 +299,7 @@
         if (view === "review") renderReview();
         else if (view === "reject") renderReject();
         else if (view === "released") renderReleased();
+        else if (view === "rejected") renderRejected();
         else renderOther();
         renderActions();
       }
@@ -359,8 +363,11 @@
           form.append("result", "rejected");
           form.append("note", note);
           await C.api("/api/jobs/" + jobId + "/check", { formData: form });
-          C.toast(C.t("check.rejected"));
-          setTimeout(function () { window.location.href = "/auftraege"; }, 900);
+          job.status = "packing";
+          busy = false;
+          view = "rejected";
+          window.scrollTo(0, 0);
+          renderAll();
         } catch (err) {
           handleCheckError(err);
         }

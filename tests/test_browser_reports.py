@@ -22,7 +22,7 @@ def reported(live_server):
     buf = io.BytesIO()
     Image.new("RGB", (200, 150), (10, 120, 200)).save(buf, format="JPEG")
     image = buf.getvalue()
-    quality = json.dumps({"sauber": "ok", "unbeschädigt": "ok", "funktion": "ok"})  # the default points
+    quality = json.dumps({"sauber": "ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"})  # the default points
     with httpx.Client(base_url=url, headers=EXPERT) as api, httpx.Client(base_url=url) as worker:
         template = api.post("/api/expert/templates", json={"name": "Messgerät", "lines": [
             {"label": "Gerät", "qty": 1, "serial_required": True, "quality_points": []}]}).json()

@@ -219,7 +219,9 @@ def test_login_by_qr_bad_inputs(client, qr_png):
     assert unreadable.json() == {"detail": "Das Bild konnte nicht gelesen werden."}
     blank = io.BytesIO()
     Image.new("RGB", (300, 300), "white").save(blank, format="PNG")
-    assert _login_qr(c, blank.getvalue()).status_code == 400
+    no_code = _login_qr(c, blank.getvalue())
+    assert no_code.status_code == 400  # readable photo without a QR code: its own hint
+    assert no_code.json() == {"detail": "Kein QR-Code erkannt – näher fotografieren oder Kurzcode eingeben."}
 
     unknown = "Ausweis oder Kurzcode unbekannt oder gesperrt."
     for text in (

@@ -30,6 +30,17 @@ def _read(image: Image.Image) -> str | None:
     return results[0].text.strip()
 
 
+def is_image(data: bytes) -> bool:
+    """True when the bytes are an image Pillow can read and that is not oversized (a photo without a code is still one)."""
+    try:
+        image = Image.open(io.BytesIO(data))
+        check_size(image)
+        image.load()
+    except _DECODE_ERRORS:
+        return False
+    return True
+
+
 def decode_qr(data: bytes, full_res_retry: bool = True) -> str | None:
     """Decode the first QR/barcode in an image, or None if unreadable.
 

@@ -6,7 +6,7 @@ from galochka import repo
 
 NOW = "2026-11-01T10:00:00+00:00"
 LATER = "2026-11-01T11:00:00+00:00"
-Q = {"sauber": "ok", "unbeschädigt": "ok", "funktion": "ok"}  # all default quality points answered
+Q = {"sauber": "ok", "unbeschädigt": "ok", "Funktion geprüft": "ok"}  # all default quality points answered
 
 LINES = [{"label": "Kabel", "qty": 3, "instruction": "Beutel"}, {"label": "Netzteil"}, {"label": "Gehäuse"}]
 
@@ -279,7 +279,7 @@ def test_kept_reduces_the_outgoing_qty(conn):
         (1, "Kabel", 2, cable, "outgoing"), (2, "Netzteil", 1, psu, "outgoing"), (3, "Gehäuse", 1, case, "outgoing"),
     ]
     assert rows[0]["instruction"] == "Beutel" and rows[0]["source"] == "template"
-    assert json.loads(rows[0]["quality_points"]) == ["sauber", "unbeschädigt", "funktion"]
+    assert json.loads(rows[0]["quality_points"]) == ["sauber", "unbeschädigt", "Funktion geprüft"]
     assert rows[0]["photo_required"] == 1 and rows[0]["serial_required"] == 0 and rows[0]["reason"] == ""
     job = repo.get_job(conn, job_id)
     assert (job["status"], job["stage"], job["stage_changed_at"]) == ("outgoing", "outgoing", LATER)
