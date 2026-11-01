@@ -36,5 +36,22 @@
   "expert.save": "Speichern",
   "expert.saved": "Gespeichert.",
   "expert.minutes_invalid": "Bitte eine Zahl zwischen 1 und 720 eingeben.",
-  "expert.points_duplicate": "Jeder Qualitätspunkt darf nur einmal vorkommen."
+  "expert.points_duplicate": "Jeder Qualitätspunkt darf nur einmal vorkommen.",
+  "error.cassandra_unreachable": "Cassandra ist nicht erreichbar.",
+  "error.cassandra_not_configured": "Cassandra ist nicht konfiguriert.",
+  "error.bad_csv": "Die CSV-Datei konnte nicht gelesen werden. Erwartet wird ein MRPeasy-Export (UTF-8) mit den Spalten „Part No.“ und „Part description“.",
+  "expert.items_active": "Aktive Artikel: {count}",
+  "expert.items_synced_at": "Letzter Abgleich: {time}",
+  "expert.items_never_synced": "Letzter Abgleich: noch nie",
+  "expert.items_cassandra": "Cassandra: {url}",
+  "expert.items_cassandra_none": "Cassandra: nicht konfiguriert",
+  "expert.items_sync": "Artikel von Cassandra laden",
+  "expert.items_sync_help": "Gleicht den Artikelstamm mit Cassandra ab. Das passiert auch automatisch einmal täglich.",
+  "expert.items_sync_running": "Wird geladen …",
+  "expert.items_result": "Neu: {added}, geändert: {updated}, deaktiviert: {deactivated}, aktiv gesamt: {total_active}",
+  "expert.items_csv_title": "CSV-Import",
+  "expert.items_csv_help": "Ersatz, wenn Cassandra nicht erreichbar ist: MRPeasy-Artikelexport als UTF-8-CSV. Artikel, die in der Datei fehlen, werden deaktiviert.",
+  "expert.items_csv_file": "CSV-Datei",
+  "expert.items_csv_import": "CSV importieren",
+  "expert.items_csv_none": "Bitte zuerst eine CSV-Datei wählen."
 }

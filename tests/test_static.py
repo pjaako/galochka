@@ -178,3 +178,12 @@ def test_style_css_has_label_print_rules():
     assert re.search(r"@page\s*\{\s*size:\s*89mm 36mm;\s*margin:\s*2mm;", css)
     assert "body.print" in css
     assert "--brand" in css and "prefers-color-scheme: dark" in css
+
+
+def test_experte_artikel_tab_has_sync_and_csv_import(client):
+    html = client.get("/experte").text
+    assert 'id="items-sync-btn"' in html
+    assert 'data-i18n="expert.items_sync"' in html
+    assert '<input type="file" id="items-csv-file" class="input-id" accept=".csv">' in html
+    assert "/api/expert/sync/items" in html and "/api/expert/import/items" in html
+    assert "/api/expert/items/stats" in html

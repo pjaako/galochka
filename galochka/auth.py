@@ -6,13 +6,14 @@ from fastapi import Header, HTTPException, Request
 from galochka.api import t
 
 
+def _expert_password_ok(request: Request, given: str | None) -> bool:
+    expected = request.app.state.settings.expert_password
+    return given is not None and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
 def require_expert(request: Request, x_expert_password: str | None = Header(default=None)) -> None:
     """Dependency for expert routes: the shared password from the env file, in X-Expert-Password."""
-    expected = request.app.state.settings.expert_password
-    ok = x_expert_password is not None and hmac.compare_digest(
-        x_expert_password.encode("utf-8"), expected.encode("utf-8")
-    )
-    if not ok:
+    if not _expert_password_ok(request, x_expert_password):
         raise HTTPException(status_code=401, detail=t("error.unauthorized"))
 
 
@@ -26,3 +27,17 @@ def require_worker(request: Request) -> sqlite3.Row:
     uses it.
     """
     raise HTTPException(status_code=401, detail=t("error.session_expired"))
+
+
+def require_worker_or_expert(
+    request: Request, x_expert_password: str | None = Header(default=None)
+) -> sqlite3.Row | None:
+    """Dependency for routes both roles use (item search, reference photos).
+
+    A correct expert password wins and returns None; otherwise the request must carry
+    a worker session (require_worker, a stub until T3, so 401 for now). A wrong expert
+    password falls through to the worker check.
+    """
+    if _expert_password_ok(request, x_expert_password):
+        return None
+    return require_worker(request)

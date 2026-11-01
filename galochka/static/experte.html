@@ -34,8 +34,31 @@
         <button type="button" class="tab-btn" id="tab-btn-export" data-tab="export" aria-pressed="false" data-i18n="expert.tab_export"></button>
       </div>
 
-      <!-- Later tasks fill these sections (Artikel: T2, Mitarbeiter: T3, Vorlagen: T4, ...). -->
-      <section id="tab-artikel" class="tab-section"></section>
+      <!-- Later tasks fill these sections (Mitarbeiter: T3, Vorlagen: T4, ...). -->
+      <section id="tab-artikel" class="tab-section">
+        <p id="items-active" class="field__label"></p>
+        <p id="items-synced" class="field__help"></p>
+        <p id="items-cassandra" class="field__help"></p>
+
+        <div class="field">
+          <p class="field__help" data-i18n="expert.items_sync_help"></p>
+          <button type="button" id="items-sync-btn" class="btn btn--primary" data-i18n="expert.items_sync"></button>
+          <p id="items-sync-result" class="field__help" role="status"></p>
+        </div>
+
+        <form id="items-csv-form" class="settings-section">
+          <h2 data-i18n="expert.items_csv_title"></h2>
+          <p class="field__help" data-i18n="expert.items_csv_help"></p>
+          <div class="field">
+            <label class="field__label" for="items-csv-file" data-i18n="expert.items_csv_file"></label>
+            <input type="file" id="items-csv-file" class="input-id" accept=".csv">
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="items-csv-btn" class="btn btn--secondary" data-i18n="expert.items_csv_import"></button>
+            <p id="items-csv-result" class="field__help" role="status"></p>
+          </div>
+        </form>
+      </section>
       <section id="tab-vorlagen" class="tab-section" hidden></section>
       <section id="tab-auftraege" class="tab-section" hidden></section>
       <section id="tab-mitarbeiter" class="tab-section" hidden></section>
@@ -122,6 +145,84 @@
         });
       }
 
+      var itemsActive = document.getElementById("items-active");
+      var itemsSynced = document.getElementById("items-synced");
+      var itemsCassandra = document.getElementById("items-cassandra");
+      var itemsSyncBtn = document.getElementById("items-sync-btn");
+      var itemsSyncResult = document.getElementById("items-sync-result");
+      var itemsCsvForm = document.getElementById("items-csv-form");
+      var itemsCsvFile = document.getElementById("items-csv-file");
+      var itemsCsvBtn = document.getElementById("items-csv-btn");
+      var itemsCsvResult = document.getElementById("items-csv-result");
+
+      function formatTime(iso) {
+        var d = new Date(iso);
+        return isNaN(d.getTime()) ? iso : d.toLocaleString("de-DE");
+      }
+
+      function fillItemStats(stats) {
+        itemsActive.textContent = C.t("expert.items_active").replace("{count}", String(stats.total_active));
+        itemsSynced.textContent = stats.synced_at
+          ? C.t("expert.items_synced_at").replace("{time}", formatTime(stats.synced_at))
+          : C.t("expert.items_never_synced");
+        itemsCassandra.textContent = stats.cassandra_url
+          ? C.t("expert.items_cassandra").replace("{url}", stats.cassandra_url)
+          : C.t("expert.items_cassandra_none");
+        itemsSyncBtn.disabled = !stats.cassandra_url;
+      }
+
+      async function loadItemStats() {
+        fillItemStats(await expertApi("/api/expert/items/stats"));
+      }
+
+      function itemsResultText(result) {
+        return C.t("expert.items_result")
+          .replace("{added}", String(result.added))
+          .replace("{updated}", String(result.updated))
+          .replace("{deactivated}", String(result.deactivated))
+          .replace("{total_active}", String(result.total_active));
+      }
+
+      itemsSyncBtn.addEventListener("click", async function () {
+        itemsSyncBtn.disabled = true;
+        itemsSyncResult.textContent = C.t("expert.items_sync_running");
+        try {
+          var result = await expertApi("/api/expert/sync/items", { method: "POST" });
+          itemsSyncResult.textContent = itemsResultText(result);
+        } catch (err) {
+          itemsSyncResult.textContent = "";
+          reportError(err);
+        }
+        itemsSyncBtn.disabled = false;
+        try {
+          await loadItemStats();
+        } catch (err) {
+          reportError(err);
+        }
+      });
+
+      itemsCsvForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var file = itemsCsvFile.files && itemsCsvFile.files[0];
+        if (!file) {
+          C.toast(C.t("expert.items_csv_none"));
+          return;
+        }
+        var formData = new FormData();
+        formData.append("file", file, file.name);
+        itemsCsvBtn.disabled = true;
+        try {
+          var result = await expertApi("/api/expert/import/items", { formData: formData });
+          itemsCsvResult.textContent = itemsResultText(result);
+          itemsCsvFile.value = "";
+          await loadItemStats();
+        } catch (err) {
+          itemsCsvResult.textContent = "";
+          reportError(err);
+        }
+        itemsCsvBtn.disabled = false;
+      });
+
       function fillSettings(settings) {
         secondCheckInput.checked = !!settings.second_check_default;
         sessionMinutesInput.value = String(settings.session_minutes);
@@ -133,10 +234,11 @@
       }
 
       // Called once the password is known to be good (GET /api/expert/settings
-      // succeeded); the same call fills the Einstellungen tab.
+      // succeeded); the same call fills the Einstellungen tab, then the Artikel stats load.
       async function enter() {
         await loadSettings();
         showApp();
+        await loadItemStats();
       }
 
       settingsForm.addEventListener("submit", async function (event) {

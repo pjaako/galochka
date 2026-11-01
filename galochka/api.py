@@ -1,15 +1,19 @@
 import json
+import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from galochka import db
+from galochka import db, repo
+from galochka.cassandra_client import CassandraClient
 from galochka.config import Settings
+
+log = logging.getLogger("galochka")
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _STRINGS_PATH = _STATIC_DIR / "strings.de.json"
@@ -46,9 +50,30 @@ def _serve_page(filename: str) -> FileResponse:
     return FileResponse(path)
 
 
+_FIRST_SYNC_DELAY_SECONDS = 10
+_SYNC_INTERVAL_SECONDS = 24 * 3600
+
+
+def _auto_sync_loop(app: FastAPI, stop: threading.Event, first_delay: float, interval: float) -> None:
+    """Daemon thread body: sync the catalog from Cassandra after first_delay, then every interval."""
+    from galochka.api_expert import run_items_sync
+
+    if stop.wait(first_delay):
+        return
+    while True:
+        try:
+            result = run_items_sync(app, "system")
+            log.info("daily item sync: %s", result)
+        except Exception as e:  # CassandraUnavailable, SQLite errors, a closed connection at shutdown
+            log.warning("daily item sync failed: %s", e)
+        if stop.wait(interval):
+            return
+
+
 def create_app(settings: Settings) -> FastAPI:
     # Imported here to avoid a circular import: api_expert -> auth -> api.
     from galochka.api_expert import router as expert_router
+    from galochka.auth import require_worker_or_expert
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.photos_dir.mkdir(parents=True, exist_ok=True)
@@ -60,13 +85,24 @@ def create_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        stop = threading.Event()
+        if settings.cassandra_url and settings.auto_sync:
+            threading.Thread(
+                target=_auto_sync_loop,
+                args=(app, stop, _FIRST_SYNC_DELAY_SECONDS, _SYNC_INTERVAL_SECONDS),
+                name="galochka-item-sync",
+                daemon=True,
+            ).start()
         yield
+        stop.set()
         conn.close()
 
     app = FastAPI(lifespan=lifespan)
     app.state.conn = conn
     app.state.lock = lock
     app.state.settings = settings
+    # Tests replace this with a fake.
+    app.state.cassandra = CassandraClient(settings.cassandra_url)
 
     @app.middleware("http")
     async def revalidate_assets(request, call_next):
@@ -114,6 +150,22 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/druck/badge/{worker_id}")
     def druck_page():
         return _serve_page("druck.html")
+
+    @app.get("/api/items", dependencies=[Depends(require_worker_or_expert)])
+    def list_items(q: str = "", limit: int = Query(50, ge=1, le=500)):
+        with lock:
+            rows = repo.search_items(conn, q, limit)
+        return [{"item_id": r["id"], "name": r["name"], "group_name": r["group_name"]} for r in rows]
+
+    @app.get("/api/items/{item_id}/reference", dependencies=[Depends(require_worker_or_expert)])
+    def item_reference(item_id: str):
+        # Never fails: Cassandra down or unknown item = no photos. The Cassandra call
+        # happens inside reference_photos, outside the lock.
+        result = app.state.cassandra.reference_photos(conn, lock, item_id, _now())
+        if not result["name"]:
+            with lock:
+                result["name"] = repo.get_item_name(conn, item_id) or ""
+        return result
 
     @app.get("/health")
     def health():

@@ -13,5 +13,11 @@ Updated: 2026-11-01
   settings API, pages as stubs, experte.html with login + tabs + working Einstellungen,
   app.js/style.css/fonts, deploy scripts, tests. Suite: 77 passed, 2 skipped (sqlite3 CLI).
 
+- T2 (2026-11-01, Sonnet, reviewed): Cassandra client (`cassandra_client.py`, the only
+  module knowing Cassandra's URLs; cached reference photos, stale-on-error, prefetch),
+  item sync from Cassandra (button + daily thread) with CSV import as fallback,
+  `GET /api/items`, `GET /api/items/{id}/reference`, Artikel tab. Known limit: Cassandra
+  has no offset paging, a group with >1000 items is truncated. Suite: 175 passed, 2 skipped.
+
 ## Next
-- T2 Items + reference photos (Cassandra client, sync, CSV fallback, reference endpoint).
+- T3 Workers + badges + sessions.

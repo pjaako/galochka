@@ -42,6 +42,6 @@ def make_image():
 
 @pytest.fixture
 def client(data_dir):
-    app = create_app(Settings(data_dir=data_dir, expert_password="experte"))
+    app = create_app(Settings(data_dir=data_dir, expert_password="experte", auto_sync=False))
     with TestClient(app) as c:
         yield c
