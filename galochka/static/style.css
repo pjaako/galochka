@@ -689,6 +689,106 @@ body.print .print-label--badge {
 }
 
 /* ============================================================
+   PAGES - Experte: Vorlagen editor, item picker, BOM preview
+   ============================================================ */
+.tpl-lines {
+  margin-top: 8px;
+}
+
+.tpl-line {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.tpl-line__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tpl-line__no {
+  flex: 1 1 auto;
+  font: 600 16px/1.4 var(--font);
+}
+
+.tpl-line__btn {
+  width: 48px;
+  padding: 0;
+}
+
+.tpl-editor__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.item-picker {
+  position: relative;
+}
+
+.item-picker__list {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.item-picker__option {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font: 400 16px/1.4 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item-picker__none {
+  padding: 8px 12px;
+  color: var(--muted);
+}
+
+.bom-lines {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.bom-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.bom-table th,
+.bom-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.bom-table__id {
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.bom-row--skipped {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+/* ============================================================
    HIDDEN OVERRIDE
    Controller ruling: the one permitted !important. Several component
    rules above (.btn, .note, .tab-section, form containers, …) set their

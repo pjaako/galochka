@@ -24,5 +24,11 @@ Updated: 2026-11-01
   HttpOnly session cookie with idle expiry, Anmelden page, Mitarbeiter tab, Dymo badge
   print page. Migration 002. Suite: 234 passed, 2 skipped.
 
+- T4 (2026-11-01, Sonnet, reviewed): templates CRUD with id-preserving full replace,
+  duplicate, delete guarded by jobs (409), `GET /api/templates`; BOM importer
+  (`BOM_COLUMNS`, real sample as fixture, dry-run preview, qty-0 rows optional,
+  unknown items kept as label-only lines, new/replace modes); Vorlagen tab editor and
+  BOM import UI. Suite: 296 passed, 2 skipped.
+
 ## Next
-- T4 Templates + BOM import.
+- T5a Jobs backend.

@@ -58,8 +58,92 @@
             <p id="items-csv-result" class="field__help" role="status"></p>
           </div>
         </form>
+
+        <section id="bom-section" class="settings-section">
+          <h2 data-i18n="expert.bom_title"></h2>
+          <p class="field__help" data-i18n="expert.bom_help"></p>
+          <form id="bom-form">
+            <div class="field">
+              <label class="field__label" for="bom-file" data-i18n="expert.bom_file"></label>
+              <input type="file" id="bom-file" class="input-id" accept=".csv">
+            </div>
+            <div class="form-actions">
+              <button type="submit" id="bom-preview-btn" class="btn btn--secondary" data-i18n="expert.bom_preview"></button>
+            </div>
+          </form>
+
+          <div id="bom-preview" hidden>
+            <p id="bom-summary" class="field__label"></p>
+            <div class="field">
+              <label class="field__label" for="bom-name" data-i18n="expert.bom_name"></label>
+              <input type="text" id="bom-name" class="input-id" maxlength="120" autocomplete="off">
+            </div>
+            <div class="field">
+              <span class="field__label" data-i18n="expert.bom_product"></span>
+              <div id="bom-product"></div>
+            </div>
+            <div class="field">
+              <label class="field__checkbox-row" for="bom-mode-new">
+                <input type="radio" name="bom-mode" id="bom-mode-new" value="new" checked>
+                <span data-i18n="expert.bom_mode_new"></span>
+              </label>
+              <label class="field__checkbox-row" for="bom-mode-replace" id="bom-mode-replace-row" hidden>
+                <input type="radio" name="bom-mode" id="bom-mode-replace" value="replace">
+                <span id="bom-mode-replace-text"></span>
+              </label>
+            </div>
+            <div class="field" id="bom-zero-row" hidden>
+              <label class="field__checkbox-row" for="bom-zero">
+                <input type="checkbox" id="bom-zero">
+                <span data-i18n="expert.bom_zero_label"></span>
+              </label>
+            </div>
+            <p id="bom-unknown" class="field__help" hidden></p>
+            <div id="bom-lines" class="bom-lines"></div>
+            <div class="form-actions">
+              <button type="button" id="bom-import-btn" class="btn btn--primary" data-i18n="expert.bom_import"></button>
+            </div>
+          </div>
+        </section>
       </section>
-      <section id="tab-vorlagen" class="tab-section" hidden></section>
+      <section id="tab-vorlagen" class="tab-section" hidden>
+        <div id="tpl-list-view">
+          <div class="form-actions">
+            <button type="button" id="tpl-new-btn" class="btn btn--primary" data-i18n="expert.tpl_new"></button>
+          </div>
+          <p id="tpl-empty" class="field__help" data-i18n="expert.tpl_empty" hidden></p>
+          <div id="tpl-list" class="worker-list"></div>
+        </div>
+
+        <form id="tpl-editor" class="settings-section" hidden>
+          <h2 id="tpl-editor-title"></h2>
+          <div class="field">
+            <label class="field__label" for="tpl-name" data-i18n="expert.tpl_name"></label>
+            <input type="text" id="tpl-name" class="input-id" maxlength="120" autocomplete="off">
+          </div>
+          <div class="field">
+            <span class="field__label" data-i18n="expert.tpl_product"></span>
+            <div id="tpl-product"></div>
+          </div>
+          <div class="field">
+            <label class="field__label" for="tpl-second-check" data-i18n="expert.tpl_second_check"></label>
+            <select id="tpl-second-check" class="select">
+              <option value="" data-i18n="expert.tpl_second_default"></option>
+              <option value="1" data-i18n="expert.tpl_second_yes"></option>
+              <option value="0" data-i18n="expert.tpl_second_no"></option>
+            </select>
+          </div>
+          <h2 data-i18n="expert.tpl_lines"></h2>
+          <div id="tpl-lines" class="tpl-lines"></div>
+          <div class="form-actions">
+            <button type="button" id="tpl-add-line" class="btn btn--secondary" data-i18n="expert.tpl_add_line"></button>
+          </div>
+          <div class="form-actions tpl-editor__actions">
+            <button type="submit" id="tpl-save-btn" class="btn btn--primary" data-i18n="expert.save"></button>
+            <button type="button" id="tpl-cancel-btn" class="btn btn--secondary" data-i18n="expert.tpl_cancel"></button>
+          </div>
+        </form>
+      </section>
       <section id="tab-auftraege" class="tab-section" hidden></section>
       <section id="tab-mitarbeiter" class="tab-section" hidden>
         <form id="worker-form">
@@ -402,6 +486,654 @@
         await refreshWorkers();
       });
 
+      // --- Artikelsuche (Vorlagen-Editor and BOM-Import) ----------------------------------
+      function clearNode(el) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+      }
+
+      function itemLabel(id, name) {
+        return name ? id + " – " + name : id;
+      }
+
+      // Text input with a small dropdown fed by GET /api/items?q=. `initial` is {id, name} or null.
+      // The chosen item id is only set by picking from the list; editing the text clears it.
+      function makeItemPicker(initial) {
+        var wrap = document.createElement("div");
+        wrap.className = "item-picker";
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "input-id";
+        input.setAttribute("autocomplete", "off");
+        input.setAttribute("placeholder", C.t("expert.tpl_item_placeholder"));
+        var list = document.createElement("div");
+        list.className = "item-picker__list";
+        list.hidden = true;
+        wrap.appendChild(input);
+        wrap.appendChild(list);
+
+        var picked = null;
+        var seq = 0;
+        var timer = null;
+
+        function hideList() {
+          seq += 1;
+          list.hidden = true;
+          clearNode(list);
+        }
+
+        function pick(item) {
+          picked = item;
+          input.value = item ? itemLabel(item.id, item.name) : "";
+          hideList();
+        }
+
+        function showResults(items) {
+          clearNode(list);
+          if (!items.length) {
+            var none = document.createElement("div");
+            none.className = "item-picker__none";
+            none.textContent = C.t("expert.tpl_item_none");
+            list.appendChild(none);
+          }
+          items.forEach(function (item) {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "item-picker__option";
+            btn.textContent = itemLabel(item.item_id, item.name);
+            // mousedown (not click) so the input does not lose focus first
+            btn.addEventListener("mousedown", function (event) {
+              event.preventDefault();
+              pick({ id: item.item_id, name: item.name });
+            });
+            list.appendChild(btn);
+          });
+          list.hidden = false;
+        }
+
+        async function search() {
+          var q = input.value.trim();
+          seq += 1;
+          var mine = seq;
+          if (!q) {
+            hideList();
+            return;
+          }
+          var items;
+          try {
+            items = await expertApi("/api/items?q=" + encodeURIComponent(q) + "&limit=10");
+          } catch (err) {
+            return;
+          }
+          if (mine !== seq) return;
+          showResults(items);
+        }
+
+        input.addEventListener("input", function () {
+          picked = null;
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(search, 250);
+        });
+        input.addEventListener("blur", function () {
+          setTimeout(hideList, 150);
+        });
+        if (initial && initial.id) pick(initial);
+
+        return {
+          el: wrap,
+          getId: function () { return picked ? picked.id : null; },
+          // true when the field is empty (no item) or an item was picked from the list
+          isValid: function () { return input.value.trim() === "" || picked !== null; },
+        };
+      }
+
+      // --- Vorlagen ----------------------------------------------------------------------
+      var tplListView = document.getElementById("tpl-list-view");
+      var tplList = document.getElementById("tpl-list");
+      var tplEmpty = document.getElementById("tpl-empty");
+      var tplNewBtn = document.getElementById("tpl-new-btn");
+      var tplEditor = document.getElementById("tpl-editor");
+      var tplEditorTitle = document.getElementById("tpl-editor-title");
+      var tplNameInput = document.getElementById("tpl-name");
+      var tplProduct = document.getElementById("tpl-product");
+      var tplSecondCheck = document.getElementById("tpl-second-check");
+      var tplLines = document.getElementById("tpl-lines");
+      var tplAddLine = document.getElementById("tpl-add-line");
+      var tplSaveBtn = document.getElementById("tpl-save-btn");
+      var tplCancelBtn = document.getElementById("tpl-cancel-btn");
+      var tplEditingId = null;
+      var tplEditingActive = true;
+      var tplProductPicker = null;
+      var templatesCache = [];
+
+      function secondCheckValue() {
+        if (tplSecondCheck.value === "1") return true;
+        if (tplSecondCheck.value === "0") return false;
+        return null;
+      }
+
+      function tplButton(labelKey, onClick) {
+        return workerButton(labelKey, onClick);
+      }
+
+      function renderTemplateRow(tpl) {
+        var row = document.createElement("div");
+        row.className = "worker-row" + (tpl.active ? "" : " worker-row--inactive");
+
+        var info = document.createElement("div");
+        info.className = "worker-row__info";
+        var name = document.createElement("div");
+        name.className = "worker-row__name";
+        name.textContent = tpl.name;
+        info.appendChild(name);
+        var meta = document.createElement("div");
+        meta.className = "worker-row__meta";
+        var parts = [];
+        if (tpl.product_item_id) {
+          parts.push(C.fmt(C.t("expert.tpl_meta_product"), { product: itemLabel(tpl.product_item_id, tpl.product_name) }));
+        }
+        parts.push(C.fmt(C.t("expert.tpl_meta_lines"), { count: tpl.line_count }));
+        if (!tpl.active) parts.push(C.t("expert.tpl_inactive"));
+        meta.textContent = parts.join(" · ");
+        info.appendChild(meta);
+        row.appendChild(info);
+
+        var actions = document.createElement("div");
+        actions.className = "worker-row__actions";
+        actions.appendChild(tplButton("expert.tpl_edit", function () { editTemplate(tpl.id); }));
+        actions.appendChild(tplButton("expert.tpl_duplicate", function () { duplicateTemplate(tpl); }));
+        actions.appendChild(
+          tplButton(tpl.active ? "expert.tpl_deactivate" : "expert.tpl_activate", function () {
+            setTemplateActive(tpl, !tpl.active);
+          })
+        );
+        actions.appendChild(tplButton("expert.tpl_delete", function () { deleteTemplate(tpl); }));
+        row.appendChild(actions);
+        return row;
+      }
+
+      async function refreshTemplates() {
+        try {
+          templatesCache = await expertApi("/api/expert/templates?all=1");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        clearNode(tplList);
+        templatesCache.forEach(function (tpl) {
+          tplList.appendChild(renderTemplateRow(tpl));
+        });
+        tplEmpty.hidden = templatesCache.length > 0;
+      }
+
+      function templateBody(tpl, active) {
+        return {
+          name: tpl.name,
+          product_item_id: tpl.product_item_id,
+          active: active,
+          second_check: tpl.second_check,
+          lines: tpl.lines.map(function (line) {
+            return {
+              id: line.id,
+              item_id: line.item_id,
+              label: line.label,
+              instruction: line.instruction,
+              qty: line.qty,
+              photo_required: line.photo_required,
+              serial_required: line.serial_required,
+              quality_points: line.quality_points,
+              photo_item_id: line.photo_item_id,
+            };
+          }),
+        };
+      }
+
+      async function setTemplateActive(tpl, active) {
+        try {
+          var full = await expertApi("/api/expert/templates/" + tpl.id);
+          await expertApi("/api/expert/templates/" + tpl.id, { method: "PUT", body: templateBody(full, active) });
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshTemplates();
+      }
+
+      async function duplicateTemplate(tpl) {
+        try {
+          await expertApi("/api/expert/templates/" + tpl.id + "/duplicate", { method: "POST" });
+          C.toast(C.t("expert.tpl_duplicated"));
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshTemplates();
+      }
+
+      async function deleteTemplate(tpl) {
+        if (!window.confirm(C.fmt(C.t("expert.tpl_delete_confirm"), { name: tpl.name }))) return;
+        try {
+          await expertApi("/api/expert/templates/" + tpl.id, { method: "DELETE" });
+          C.toast(C.t("expert.tpl_deleted"));
+        } catch (err) {
+          reportError(err); // 409: the template is used by jobs
+        }
+        await refreshTemplates();
+      }
+
+      function renumberLines() {
+        var rows = tplLines.children;
+        for (var i = 0; i < rows.length; i++) {
+          rows[i]._line.number.textContent = String(i + 1);
+        }
+      }
+
+      function lineLabelled(labelKey, control) {
+        var wrap = document.createElement("label");
+        wrap.className = "field";
+        var span = document.createElement("span");
+        span.className = "field__label";
+        span.textContent = C.t(labelKey);
+        wrap.appendChild(span);
+        wrap.appendChild(control);
+        return wrap;
+      }
+
+      function lineCheckbox(labelKey, checked) {
+        var wrap = document.createElement("label");
+        wrap.className = "field__checkbox-row";
+        var box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = checked;
+        var span = document.createElement("span");
+        span.textContent = C.t(labelKey);
+        wrap.appendChild(box);
+        wrap.appendChild(span);
+        return { el: wrap, box: box };
+      }
+
+      function lineIconButton(text, titleKey, onClick) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn--secondary tpl-line__btn";
+        btn.textContent = text;
+        btn.title = C.t(titleKey);
+        btn.setAttribute("aria-label", C.t(titleKey));
+        btn.addEventListener("click", onClick);
+        return btn;
+      }
+
+      function textInput(value, maxLength) {
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "input-id";
+        input.maxLength = maxLength;
+        input.setAttribute("autocomplete", "off");
+        input.value = value || "";
+        return input;
+      }
+
+      // Append one editable line to the editor. `line` is a template line from the API or null.
+      function addLineRow(line) {
+        line = line || {};
+        var row = document.createElement("div");
+        row.className = "tpl-line";
+
+        var head = document.createElement("div");
+        head.className = "tpl-line__head";
+        var number = document.createElement("span");
+        number.className = "tpl-line__no";
+        head.appendChild(number);
+        head.appendChild(
+          lineIconButton("↑", "expert.tpl_line_up", function () {
+            var prev = row.previousElementSibling;
+            if (prev) tplLines.insertBefore(row, prev);
+            renumberLines();
+          })
+        );
+        head.appendChild(
+          lineIconButton("↓", "expert.tpl_line_down", function () {
+            var next = row.nextElementSibling;
+            if (next) tplLines.insertBefore(next, row);
+            renumberLines();
+          })
+        );
+        head.appendChild(
+          lineIconButton("✕", "expert.tpl_line_remove", function () {
+            tplLines.removeChild(row);
+            renumberLines();
+          })
+        );
+        row.appendChild(head);
+
+        var picker = makeItemPicker(line.item_id ? { id: line.item_id, name: line.item_name } : null);
+        var itemField = document.createElement("div");
+        itemField.className = "field";
+        var itemLab = document.createElement("span");
+        itemLab.className = "field__label";
+        itemLab.textContent = C.t("expert.tpl_line_item");
+        itemField.appendChild(itemLab);
+        itemField.appendChild(picker.el);
+        row.appendChild(itemField);
+
+        var labelInput = textInput(line.label, 120);
+        row.appendChild(lineLabelled("expert.tpl_line_label", labelInput));
+        var instrInput = textInput(line.instruction, 500);
+        row.appendChild(lineLabelled("expert.tpl_line_instruction", instrInput));
+
+        var qtyInput = document.createElement("input");
+        qtyInput.type = "number";
+        qtyInput.className = "select";
+        qtyInput.min = "1";
+        qtyInput.max = "999";
+        qtyInput.step = "1";
+        qtyInput.value = String(line.qty || 1);
+        row.appendChild(lineLabelled("expert.tpl_line_qty", qtyInput));
+
+        var photo = lineCheckbox("expert.tpl_line_photo", line.photo_required !== false);
+        var serial = lineCheckbox("expert.tpl_line_serial", !!line.serial_required);
+        row.appendChild(photo.el);
+        row.appendChild(serial.el);
+
+        var pointsInput = textInput((line.quality_points || []).join(", "), 700);
+        row.appendChild(lineLabelled("expert.tpl_line_points", pointsInput));
+
+        row._line = {
+          id: line.id === undefined ? null : line.id,
+          photoItemId: line.photo_item_id || null,
+          number: number,
+          picker: picker,
+          labelInput: labelInput,
+          instrInput: instrInput,
+          qtyInput: qtyInput,
+          photo: photo.box,
+          serial: serial.box,
+          pointsInput: pointsInput,
+        };
+        tplLines.appendChild(row);
+        renumberLines();
+        return row;
+      }
+
+      // Read the editor into a request body, or toast the problem and return null.
+      function collectTemplate() {
+        var name = tplNameInput.value.trim();
+        if (!name) {
+          C.toast(C.t("expert.tpl_name_required"));
+          return null;
+        }
+        if (!tplProductPicker.isValid()) {
+          C.toast(C.t("expert.tpl_item_pick"));
+          return null;
+        }
+        var lines = [];
+        var rows = tplLines.children;
+        for (var i = 0; i < rows.length; i++) {
+          var st = rows[i]._line;
+          if (!st.picker.isValid()) {
+            C.toast(C.t("expert.tpl_item_pick"));
+            return null;
+          }
+          var itemId = st.picker.getId();
+          var label = st.labelInput.value.trim();
+          if (!label && !itemId) {
+            C.toast(C.t("expert.tpl_label_required"));
+            return null;
+          }
+          var qtyText = st.qtyInput.value.trim();
+          var qty = /^\d+$/.test(qtyText) ? parseInt(qtyText, 10) : 0;
+          if (qty < 1 || qty > 999) {
+            C.toast(C.t("expert.tpl_qty_invalid"));
+            return null;
+          }
+          var points = st.pointsInput.value
+            .split(",")
+            .map(function (p) { return p.trim(); })
+            .filter(function (p) { return p !== ""; });
+          var tooLong = points.some(function (p) { return p.length > 60; });
+          if (points.length > 10 || tooLong || points.filter(function (p, k) { return points.indexOf(p) !== k; }).length) {
+            C.toast(C.t("expert.tpl_points_invalid"));
+            return null;
+          }
+          lines.push({
+            id: st.id,
+            item_id: itemId,
+            label: label,
+            instruction: st.instrInput.value.trim(),
+            qty: qty,
+            photo_required: st.photo.checked,
+            serial_required: st.serial.checked,
+            quality_points: points,
+            photo_item_id: st.photoItemId,
+          });
+        }
+        return {
+          name: name,
+          product_item_id: tplProductPicker.getId(),
+          second_check: secondCheckValue(),
+          lines: lines,
+        };
+      }
+
+      // template = full template from the API, or null for a new one.
+      function openEditor(template) {
+        tplEditingId = template ? template.id : null;
+        tplEditingActive = template ? template.active : true;
+        tplEditorTitle.textContent = C.t(template ? "expert.tpl_editor_edit" : "expert.tpl_editor_new");
+        tplNameInput.value = template ? template.name : "";
+        clearNode(tplProduct);
+        tplProductPicker = makeItemPicker(
+          template && template.product_item_id ? { id: template.product_item_id, name: template.product_name } : null
+        );
+        tplProduct.appendChild(tplProductPicker.el);
+        tplSecondCheck.value = template && template.second_check !== null ? (template.second_check ? "1" : "0") : "";
+        clearNode(tplLines);
+        (template ? template.lines : []).forEach(function (line) { addLineRow(line); });
+        tplListView.hidden = true;
+        tplEditor.hidden = false;
+        if (tplEditor.scrollIntoView) tplEditor.scrollIntoView();
+      }
+
+      function closeEditor() {
+        tplEditor.hidden = true;
+        tplListView.hidden = false;
+        tplEditingId = null;
+      }
+
+      async function editTemplate(id) {
+        try {
+          openEditor(await expertApi("/api/expert/templates/" + id));
+        } catch (err) {
+          reportError(err);
+        }
+      }
+
+      tplNewBtn.addEventListener("click", function () { openEditor(null); });
+      tplAddLine.addEventListener("click", function () {
+        var row = addLineRow(null);
+        row._line.picker.el.querySelector("input").focus();
+      });
+      tplCancelBtn.addEventListener("click", closeEditor);
+      tplEditor.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var body = collectTemplate();
+        if (!body) return;
+        tplSaveBtn.disabled = true;
+        try {
+          if (tplEditingId === null) {
+            await expertApi("/api/expert/templates", { body: body });
+          } else {
+            body.active = tplEditingActive;
+            await expertApi("/api/expert/templates/" + tplEditingId, { method: "PUT", body: body });
+          }
+          C.toast(C.t("expert.tpl_saved"));
+          closeEditor();
+          await refreshTemplates();
+        } catch (err) {
+          reportError(err);
+        }
+        tplSaveBtn.disabled = false;
+      });
+
+      // --- BOM-Import (Artikel tab) ------------------------------------------------------
+      var bomForm = document.getElementById("bom-form");
+      var bomFile = document.getElementById("bom-file");
+      var bomPreviewBtn = document.getElementById("bom-preview-btn");
+      var bomPreview = document.getElementById("bom-preview");
+      var bomSummary = document.getElementById("bom-summary");
+      var bomNameInput = document.getElementById("bom-name");
+      var bomProduct = document.getElementById("bom-product");
+      var bomModeNew = document.getElementById("bom-mode-new");
+      var bomModeReplace = document.getElementById("bom-mode-replace");
+      var bomModeReplaceRow = document.getElementById("bom-mode-replace-row");
+      var bomModeReplaceText = document.getElementById("bom-mode-replace-text");
+      var bomZeroRow = document.getElementById("bom-zero-row");
+      var bomZero = document.getElementById("bom-zero");
+      var bomUnknown = document.getElementById("bom-unknown");
+      var bomLines = document.getElementById("bom-lines");
+      var bomImportBtn = document.getElementById("bom-import-btn");
+      var bomData = null;
+      var bomProductPicker = null;
+
+      function bomFormData(dry) {
+        var file = bomFile.files && bomFile.files[0];
+        var formData = new FormData();
+        formData.append("file", file, file.name);
+        formData.append("dry_run", dry ? "1" : "0");
+        formData.append("include_zero_qty", bomZero.checked ? "1" : "0");
+        return formData;
+      }
+
+      function bomCell(row, text, className) {
+        var td = document.createElement("td");
+        if (className) td.className = className;
+        td.textContent = text;
+        row.appendChild(td);
+        return td;
+      }
+
+      function renderBomLines(lines) {
+        clearNode(bomLines);
+        var table = document.createElement("table");
+        table.className = "bom-table";
+        var headRow = document.createElement("tr");
+        ["expert.bom_col_pos", "expert.bom_col_item", "expert.bom_col_name", "expert.bom_col_qty", "expert.bom_col_known"]
+          .forEach(function (key) {
+            var th = document.createElement("th");
+            th.textContent = C.t(key);
+            headRow.appendChild(th);
+          });
+        table.appendChild(headRow);
+        lines.forEach(function (line) {
+          var tr = document.createElement("tr");
+          if (line.skipped_zero_qty) tr.className = "bom-row--skipped";
+          bomCell(tr, String(line.position));
+          bomCell(tr, line.item_id, "bom-table__id");
+          var text = line.item_name || line.label;
+          if (line.version) text += " · " + line.version;
+          if (line.skipped_zero_qty) text += " – " + C.t("expert.bom_skipped");
+          bomCell(tr, text);
+          bomCell(tr, String(line.qty));
+          bomCell(tr, line.known ? "✓" : "✗");
+          table.appendChild(tr);
+        });
+        bomLines.appendChild(table);
+      }
+
+      // keep = true: a re-preview (zero-quantity box) must not overwrite what the expert typed.
+      function renderBomPreview(data, keep) {
+        bomData = data;
+        var product = data.product_item_id
+          ? itemLabel(data.product_item_id, data.product_name) +
+            (data.product_known ? "" : " (" + C.t("expert.bom_product_unknown") + ")")
+          : "–";
+        bomSummary.textContent = C.fmt(C.t("expert.bom_summary"), {
+          bom_number: data.bom_number,
+          bom_name: data.bom_name,
+          product: product,
+        });
+        if (!keep) {
+          bomNameInput.value = data.bom_name || data.bom_number;
+          clearNode(bomProduct);
+          bomProductPicker = makeItemPicker(
+            data.product_known ? { id: data.product_item_id, name: data.product_name } : null
+          );
+          bomProduct.appendChild(bomProductPicker.el);
+          bomModeNew.checked = true;
+        }
+        if (data.existing_template_id) {
+          var existing = templatesCache.filter(function (tpl) { return tpl.id === data.existing_template_id; })[0];
+          bomModeReplaceText.textContent = C.fmt(C.t("expert.bom_mode_replace"), {
+            name: existing ? existing.name : "#" + data.existing_template_id,
+          });
+          bomModeReplaceRow.hidden = false;
+        } else {
+          bomModeReplaceRow.hidden = true;
+          bomModeNew.checked = true;
+        }
+        bomZeroRow.hidden = !data.lines.some(function (line) { return line.qty === 0; });
+        if (data.unknown_items.length) {
+          bomUnknown.textContent = C.fmt(C.t("expert.bom_unknown"), {
+            count: data.unknown_items.length,
+            items: data.unknown_items.join(", "),
+          });
+          bomUnknown.hidden = false;
+        } else {
+          bomUnknown.hidden = true;
+        }
+        renderBomLines(data.lines);
+        bomPreview.hidden = false;
+      }
+
+      async function runBomPreview(keep) {
+        var file = bomFile.files && bomFile.files[0];
+        if (!file) {
+          C.toast(C.t("expert.bom_none"));
+          return;
+        }
+        bomPreviewBtn.disabled = true;
+        try {
+          renderBomPreview(await expertApi("/api/expert/import/bom", { formData: bomFormData(true) }), keep);
+        } catch (err) {
+          bomPreview.hidden = true;
+          bomData = null;
+          reportError(err);
+        }
+        bomPreviewBtn.disabled = false;
+      }
+
+      bomForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        runBomPreview(false);
+      });
+      bomZero.addEventListener("change", function () { runBomPreview(true); });
+
+      bomImportBtn.addEventListener("click", async function () {
+        if (!bomData) return;
+        if (!bomProductPicker.isValid()) {
+          C.toast(C.t("expert.tpl_item_pick"));
+          return;
+        }
+        var formData = bomFormData(false);
+        formData.append("name", bomNameInput.value.trim());
+        formData.append("product_item_id", bomProductPicker.getId() || "");
+        var replace = bomModeReplace.checked && bomData.existing_template_id;
+        formData.append("mode", replace ? "replace:" + bomData.existing_template_id : "new");
+        bomImportBtn.disabled = true;
+        try {
+          var result = await expertApi("/api/expert/import/bom", { formData: formData });
+          var count = result.lines.filter(function (line) { return !line.skipped_zero_qty; }).length;
+          C.toast(C.fmt(C.t("expert.bom_imported"), { count: count }));
+          bomPreview.hidden = true;
+          bomData = null;
+          bomFile.value = "";
+          bomZero.checked = false;
+          switchTab("vorlagen");
+          await refreshTemplates();
+          await editTemplate(result.template_id);
+        } catch (err) {
+          reportError(err);
+        }
+        bomImportBtn.disabled = false;
+      });
+
       // Called once the password is known to be good (GET /api/expert/settings
       // succeeded); the same call fills the Einstellungen tab, then the Artikel stats load.
       async function enter() {
@@ -409,6 +1141,7 @@
         showApp();
         await loadItemStats();
         await refreshWorkers();
+        await refreshTemplates();
       }
 
       settingsForm.addEventListener("submit", async function (event) {

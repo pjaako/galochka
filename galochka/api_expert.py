@@ -1,8 +1,9 @@
 import json
+import math
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from galochka import importer, qr, repo
 from galochka.api import _now, _read_upload, t
@@ -246,3 +247,287 @@ def badge_svg(worker_id: int, request: Request):
         raise _not_found()
     svg = qr.make_svg(f"galochka:badge:{badge['token']}")  # rendering outside the lock
     return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+# --- templates ------------------------------------------------------------------------------
+
+
+class TemplateLineIn(BaseModel):
+    """One template line. The limits live in repo.clean_line (shared with the repo layer)."""
+
+    id: int | None = None
+    item_id: str | None = None
+    label: str = ""
+    instruction: str = ""
+    qty: int = 1
+    photo_required: bool = True
+    serial_required: bool = False
+    quality_points: list[str] = []
+    photo_item_id: str | None = None
+
+    @model_validator(mode="after")
+    def _limits(self):
+        repo.clean_line(self.model_dump())  # raises ValueError -> 422
+        return self
+
+
+class TemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=repo.MAX_NAME)
+    product_item_id: str | None = None
+    second_check: bool | None = None
+    lines: list[TemplateLineIn] = Field(default_factory=list, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, name: str) -> str:
+        return repo.clean_template_name(name)
+
+
+class TemplateUpdate(TemplateCreate):
+    active: bool | None = None  # None = keep the current flag
+
+
+def _value_error(e: ValueError) -> HTTPException:
+    """Map a repo ValueError (bad reference or value in a template payload) to 422."""
+    message = str(e)
+    if message.startswith("unknown_item:"):
+        return HTTPException(status_code=422, detail=f"{t('error.unknown_item')} {message.split(':', 1)[1]}")
+    if message == "label_required":
+        return HTTPException(status_code=422, detail=t("error.label_required"))
+    return HTTPException(status_code=422, detail=t("error.invalid_request"))
+
+
+def _line_dicts(body: TemplateCreate) -> list[dict]:
+    return [line.model_dump() for line in body.lines]
+
+
+@router.get("/templates")
+def list_templates(request: Request, show_all: int = Query(0, alias="all")):
+    with request.app.state.lock:
+        return repo.list_templates(request.app.state.conn, active_only=not show_all)
+
+
+@router.post("/templates", status_code=201)
+def create_template(body: TemplateCreate, request: Request):
+    conn = request.app.state.conn
+    now = _now()
+    with request.app.state.lock:
+        try:
+            template_id = repo.create_template(
+                conn, body.name, body.product_item_id, body.second_check, _line_dicts(body), now, commit=False
+            )
+        except ValueError as e:
+            conn.rollback()
+            raise _value_error(e)
+        except Exception:
+            conn.rollback()
+            raise
+        audit(conn, now, "expert", "template.create", "template", template_id,
+              {"name": body.name, "lines": len(body.lines)})
+        return repo.get_template(conn, template_id)
+
+
+@router.get("/templates/{template_id}")
+def get_template(template_id: int, request: Request):
+    with request.app.state.lock:
+        template = repo.get_template(request.app.state.conn, template_id)
+    if template is None:
+        raise _not_found()
+    return template
+
+
+@router.put("/templates/{template_id}")
+def put_template(template_id: int, body: TemplateUpdate, request: Request):
+    conn = request.app.state.conn
+    now = _now()
+    with request.app.state.lock:
+        current = repo.get_template(conn, template_id)
+        if current is None:
+            raise _not_found()
+        active = current["active"] if body.active is None else body.active
+        try:
+            repo.replace_template(
+                conn, template_id, body.name, body.product_item_id, active, body.second_check,
+                _line_dicts(body), now, commit=False,
+            )
+        except ValueError as e:
+            conn.rollback()
+            raise _value_error(e)
+        except Exception:
+            conn.rollback()
+            raise
+        audit(conn, now, "expert", "template.replace", "template", template_id,
+              {"name": body.name, "lines": len(body.lines), "active": active})
+        return repo.get_template(conn, template_id)
+
+
+@router.delete("/templates/{template_id}", status_code=204)
+def delete_template(template_id: int, request: Request):
+    conn = request.app.state.conn
+    with request.app.state.lock:
+        template = repo.get_template(conn, template_id)
+        if template is None:
+            raise _not_found()
+        try:
+            repo.delete_template(conn, template_id, commit=False)
+        except ValueError:  # template_in_use
+            conn.rollback()
+            raise HTTPException(status_code=409, detail=t("error.template_in_use"))
+        except Exception:
+            conn.rollback()
+            raise
+        audit(conn, _now(), "expert", "template.delete", "template", template_id, {"name": template["name"]})
+    return Response(status_code=204)
+
+
+@router.post("/templates/{template_id}/duplicate", status_code=201)
+def duplicate_template(template_id: int, request: Request):
+    conn = request.app.state.conn
+    now = _now()
+    with request.app.state.lock:
+        try:
+            new_id = repo.duplicate_template(conn, template_id, now, commit=False)
+        except KeyError:
+            conn.rollback()
+            raise _not_found()
+        except Exception:
+            conn.rollback()
+            raise
+        audit(conn, now, "expert", "template.duplicate", "template", new_id, {"source_id": template_id})
+        return repo.get_template(conn, new_id)
+
+
+# --- BOM import -----------------------------------------------------------------------------
+
+def _is_true(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_false(value: str) -> bool:
+    return value.strip().lower() in {"0", "false", "no", "off"}
+
+
+def _bom_qty(qty: float) -> int:
+    """Template quantity of a BOM quantity: integral stays, a fraction rounds up; 1..999."""
+    whole = int(qty) if qty == int(qty) else math.ceil(qty)
+    return min(max(whole, 1), repo.MAX_QTY)
+
+
+def _bom_label(row: importer.BomRow, known_name: str) -> str:
+    label = row.label or known_name or row.item_id
+    if row.version:
+        label = f"{label} \u00b7 Version {row.version}"
+    return label[: repo.MAX_NAME]
+
+
+@router.post("/import/bom")
+def import_bom(
+    request: Request,
+    file: UploadFile = File(...),
+    dry_run: str | None = Form(None),
+    dry_run_query: str | None = Query(None, alias="dry_run"),
+    name: str = Form(""),
+    product_item_id: str = Form(""),
+    include_zero_qty: str = Form("0"),
+    mode: str = Form("new"),
+):
+    data = _read_upload(file)
+    try:
+        bom = importer.parse_bom(data)  # pure CPU work, outside the lock
+    except importer.ImportError_:
+        raise HTTPException(status_code=400, detail=t("error.bad_csv"))
+    # Dry run is the default; the form field wins over the ?dry_run= query parameter of the spec.
+    # Only an explicit "0"/"false" writes anything.
+    dry = not _is_false(dry_run if dry_run is not None else dry_run_query if dry_run_query is not None else "1")
+    include_zero = _is_true(include_zero_qty)
+    mode = mode.strip() or "new"
+    replace_id = None
+    if mode != "new":
+        head, _, tail = mode.partition(":")
+        if head != "replace" or not tail.isdigit():
+            raise HTTPException(status_code=422, detail=t("error.invalid_request"))
+        replace_id = int(tail)
+
+    conn = request.app.state.conn
+    now = _now()
+    with request.app.state.lock:
+        names = repo.item_names(conn, [r.item_id for r in bom.rows] + [bom.product_item_id])
+        product_known = bom.product_item_id in names
+        form_product = product_item_id.strip()
+        chosen_product = form_product or (bom.product_item_id if product_known else None) or None
+        lines = []
+        for row in bom.rows:
+            lines.append(
+                {
+                    "position": row.position,
+                    "item_id": row.item_id,
+                    "item_name": names.get(row.item_id, ""),
+                    "label": row.label,
+                    "version": row.version,
+                    "qty": int(row.qty) if row.qty == int(row.qty) else row.qty,
+                    "notes": row.notes,
+                    "known": row.item_id in names,
+                    "skipped_zero_qty": row.qty == 0 and not include_zero,
+                }
+            )
+        taken = [ln for ln in lines if not ln["skipped_zero_qty"]]
+        result = {
+            "bom_number": bom.bom_number,
+            "bom_name": bom.bom_name,
+            "product_item_id": bom.product_item_id,
+            "product_name": bom.product_name,
+            "product_known": product_known,
+            "lines": lines,
+            "unknown_items": [ln["item_id"] for ln in taken if not ln["known"]],
+            "existing_template_id": repo.find_template_for_bom(conn, bom.bom_name, chosen_product),
+            "template_id": None,
+        }
+        if dry:
+            return result
+
+        template_lines = [
+            {
+                "item_id": ln["item_id"] if ln["known"] else None,
+                "label": _bom_label(row, ln["item_name"]),
+                "instruction": ln["notes"][: repo.MAX_INSTRUCTION],
+                "qty": _bom_qty(ln["qty"]),
+                "photo_required": True,
+                "serial_required": False,
+                "quality_points": [],
+            }
+            for ln, row in zip(lines, bom.rows)
+            if not ln["skipped_zero_qty"]
+        ]
+        try:
+            if replace_id is None:
+                template_name = (name.strip() or bom.bom_name or bom.bom_number)[: repo.MAX_NAME]
+                template_id = repo.create_template(
+                    conn, template_name, chosen_product, None, template_lines, now, commit=False
+                )
+            else:
+                current = repo.get_template(conn, replace_id)
+                if current is None:
+                    raise _not_found()
+                template_id = replace_id
+                repo.replace_template(
+                    conn, replace_id,
+                    name.strip() or current["name"],
+                    form_product or current["product_item_id"],
+                    current["active"], current["second_check"], template_lines, now, commit=False,
+                )
+        except ValueError as e:
+            conn.rollback()
+            raise _value_error(e)
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+        audit(conn, now, "expert", "bom.import", "template", template_id, {
+            "bom_number": bom.bom_number, "mode": "new" if replace_id is None else "replace",
+            "lines": len(template_lines), "unknown_items": len(result["unknown_items"]),
+            "filename": file.filename or "",
+        })
+        result["template_id"] = template_id
+        return result

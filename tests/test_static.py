@@ -257,3 +257,49 @@ def test_experte_artikel_tab_has_sync_and_csv_import(client):
     assert '<input type="file" id="items-csv-file" class="input-id" accept=".csv">' in html
     assert "/api/expert/sync/items" in html and "/api/expert/import/items" in html
     assert "/api/expert/items/stats" in html
+
+
+def test_experte_vorlagen_tab_markup(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-vorlagen".*?</section>', html, re.S).group(0)
+    assert "hidden" in section.split(">", 1)[0]
+    for element_id in ("tpl-new-btn", "tpl-list", "tpl-editor", "tpl-name", "tpl-product", "tpl-second-check",
+                       "tpl-lines", "tpl-add-line", "tpl-save-btn", "tpl-cancel-btn"):
+        assert f'id="{element_id}"' in section, element_id
+    # second check select: Standard / Ja / Nein
+    for key in ("expert.tpl_second_default", "expert.tpl_second_yes", "expert.tpl_second_no"):
+        assert f'data-i18n="{key}"' in section
+    for key in ("expert.tpl_new", "expert.tpl_add_line", "expert.tpl_cancel", "expert.save"):
+        assert f'data-i18n="{key}"' in section
+    for key in ("expert.tpl_edit", "expert.tpl_duplicate", "expert.tpl_deactivate", "expert.tpl_activate",
+                "expert.tpl_delete", "expert.tpl_delete_confirm", "expert.tpl_line_up", "expert.tpl_line_down",
+                "expert.tpl_line_remove", "expert.tpl_line_points", "expert.tpl_line_photo", "expert.tpl_line_serial"):
+        assert key in html, key
+    assert "/api/expert/templates" in html and "/duplicate" in html and "/api/items?q=" in html
+    assert 'lineIconButton("↑"' in html and 'lineIconButton("↓"' in html
+
+
+def test_experte_bom_import_in_artikel_tab(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-artikel".*?<section id="tab-vorlagen"', html, re.S).group(0)
+    assert section.index('id="items-csv-form"') < section.index('id="bom-section"')
+    assert '<input type="file" id="bom-file" class="input-id" accept=".csv">' in section
+    for element_id in ("bom-form", "bom-preview-btn", "bom-preview", "bom-name", "bom-product", "bom-mode-new",
+                       "bom-mode-replace", "bom-zero", "bom-lines", "bom-import-btn"):
+        assert f'id="{element_id}"' in section, element_id
+    assert 'data-i18n="expert.bom_preview"' in section and 'data-i18n="expert.bom_import"' in section
+    assert "/api/expert/import/bom" in html
+    assert 'formData.append("dry_run"' in html and 'formData.append("include_zero_qty"' in html
+    assert '"replace:"' in html and 'switchTab("vorlagen")' in html
+
+
+def test_template_and_bom_strings_exist_in_german():
+    strings = _strings()
+    for key in ("error.template_in_use", "error.unknown_item", "error.bom_missing_columns", "error.bom_empty",
+                "expert.tpl_second_default", "expert.bom_skipped", "expert.bom_zero_label"):
+        assert key in strings, key
+    assert "Aufträgen" in strings["error.template_in_use"]
+    # every key the Vorlagen/BOM code passes around as a plain string literal exists
+    html = (STATIC_DIR / "experte.html").read_text(encoding="utf-8")
+    for key in set(re.findall(r'"(expert\.(?:tpl|bom)_[\w]+)"', html)):
+        assert key in strings, key

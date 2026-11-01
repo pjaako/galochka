@@ -237,6 +237,21 @@ def create_app(settings: Settings) -> FastAPI:
                 result["name"] = repo.get_item_name(conn, item_id) or ""
         return result
 
+    @app.get("/api/templates", dependencies=[Depends(require_worker_or_expert)])
+    def list_templates():
+        with lock:
+            rows = repo.list_templates(conn, active_only=True)
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "product_item_id": r["product_item_id"],
+                "line_count": r["line_count"],
+                "second_check": r["second_check"],
+            }
+            for r in rows
+        ]
+
     @app.get("/health")
     def health():
         with lock:

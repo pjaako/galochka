@@ -87,3 +87,40 @@ def new_worker_client(client):
 def worker_client(new_worker_client):
     """(TestClient logged in as the worker "Anna", worker dict). See new_worker_client."""
     return new_worker_client("Anna")
+
+
+@pytest.fixture
+def add_items(client):
+    """Insert catalog rows: add_items(("A1", "Name"), ("A2", "Other")) or add_items("A1", "A2")."""
+
+    def _add(*items):
+        conn = client.app.state.conn
+        with client.app.state.lock:
+            for item in items:
+                item_id, name = item if isinstance(item, tuple) else (item, f"Item {item}")
+                conn.execute(
+                    "INSERT INTO items (id, name, updated_at) VALUES (?, ?, '2026-11-01T00:00:00+00:00')"
+                    " ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+                    (item_id, name),
+                )
+            conn.commit()
+
+    return _add
+
+
+@pytest.fixture
+def add_job(client):
+    """Insert a minimal job row for a template (the jobs API does not exist yet)."""
+
+    def _add(template_id: int) -> int:
+        conn = client.app.state.conn
+        with client.app.state.lock:
+            cur = conn.execute(
+                "INSERT INTO jobs (kind, template_id, template_name, status, created_by, created_at, stage_changed_at)"
+                " VALUES ('delivery', ?, 'x', 'open', 'expert', '2026-11-01T00:00:00+00:00', '2026-11-01T00:00:00+00:00')",
+                (template_id,),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    return _add

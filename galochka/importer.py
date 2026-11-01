@@ -57,6 +57,122 @@ def parse_csv(data: bytes) -> list[ImportRow]:
     return rows
 
 
+# --- MRPeasy BOM export ---------------------------------------------------------------------
+# One BOM per file, flat (top level only). The header mapping lives in this one dict so a
+# changed MRPeasy export is a one-line fix: field -> accepted header names (first match wins).
+BOM_COLUMNS = {
+    "bom_number": ["BOM number"],
+    "bom_name": ["BOM name"],
+    "product_item_id": ["Product number"],
+    "product_name": ["Product name"],
+    "item_id": ["Part No."],
+    "label": ["Part description"],
+    "version": ["Parameters"],
+    "uom": ["UoM"],
+    "qty": ["Quantity"],
+    "notes": ["Notes"],
+}
+_BOM_REQUIRED = ("item_id", "qty")
+
+
+@dataclass
+class BomRow:
+    item_id: str
+    label: str
+    version: str
+    uom: str
+    qty: float
+    notes: str
+    position: int  # 1-based, in file order, among the rows that have a Part No.
+
+
+@dataclass
+class BomFile:
+    bom_number: str
+    bom_name: str
+    product_item_id: str
+    product_name: str
+    rows: list[BomRow]
+
+
+def _norm_header(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def _resolve_columns(fieldnames: list[str], columns: dict[str, list[str]]) -> dict[str, str | None]:
+    """Map each field to the actual header of the file (case- and whitespace-tolerant), or None."""
+    by_norm: dict[str, str] = {}
+    for name in fieldnames:
+        by_norm.setdefault(_norm_header(name), name)
+    resolved: dict[str, str | None] = {}
+    for field, aliases in columns.items():
+        resolved[field] = next((by_norm[_norm_header(a)] for a in aliases if _norm_header(a) in by_norm), None)
+    return resolved
+
+
+def _parse_qty(raw: str) -> float:
+    text = raw.strip().replace(" ", "")
+    if not text:
+        return 0.0
+    try:
+        value = float(text.replace(",", "."))
+    except ValueError as e:
+        raise ImportError_("error.bom_bad_qty") from e
+    if value < 0 or value != value or value == float("inf"):
+        raise ImportError_("error.bom_bad_qty")
+    return value
+
+
+def parse_bom(data: bytes) -> BomFile:
+    """Parse one MRPeasy BOM export. Pure: no database, no HTTP.
+
+    Raises ImportError_ whose message is a strings.de.json key (error.bom_*): not UTF-8,
+    empty file or no rows, missing Part No./Quantity column, unreadable quantity or CSV.
+    Rows without a Part No. are skipped; the BOM/product header fields come from the first row.
+    """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise ImportError_("error.bom_encoding") from e
+    if not text.strip():
+        raise ImportError_("error.bom_empty")
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        fieldnames = reader.fieldnames or []
+        cols = _resolve_columns(fieldnames, BOM_COLUMNS)
+        if any(cols[f] is None for f in _BOM_REQUIRED):
+            raise ImportError_("error.bom_missing_columns")
+
+        def cell(row: dict, field: str) -> str:
+            header = cols[field]
+            return (row.get(header) or "").strip() if header else ""
+
+        head: dict[str, str] | None = None
+        rows: list[BomRow] = []
+        for raw in reader:
+            if head is None:
+                head = {f: cell(raw, f) for f in ("bom_number", "bom_name", "product_item_id", "product_name")}
+            item_id = cell(raw, "item_id")
+            if not item_id:
+                continue
+            rows.append(
+                BomRow(
+                    item_id=item_id,
+                    label=cell(raw, "label"),
+                    version=cell(raw, "version"),
+                    uom=cell(raw, "uom"),
+                    qty=_parse_qty(cell(raw, "qty")),
+                    notes=cell(raw, "notes"),
+                    position=len(rows) + 1,
+                )
+            )
+    except csv.Error as e:
+        raise ImportError_("error.bom_unreadable") from e
+    if not rows or head is None:
+        raise ImportError_("error.bom_empty")
+    return BomFile(rows=rows, **head)
+
+
 def _version_sort_key(version: str):
     """Ascending order: numeric versions first (by value), non-numeric last (by string)."""
     try:
