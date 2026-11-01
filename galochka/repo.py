@@ -746,14 +746,15 @@ def _insert_line(conn: sqlite3.Connection, job_id: int, stage: str, position: in
     cur = conn.execute(
         "INSERT INTO job_lines (job_id, template_line_id, stage, position, item_id, label, instruction, qty,"
         " photo_required, serial_required, quality_points, photo_item_id, source, withheld, withheld_reason,"
-        " withheld_by, reason)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " withheld_by, reason, source_line_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id, line.get("template_line_id"), stage, position, line.get("item_id"), line["label"],
             line.get("instruction", ""), line["qty"], 1 if line.get("photo_required", True) else 0,
             1 if line.get("serial_required") else 0, json.dumps(line["quality_points"], ensure_ascii=False),
             line.get("photo_item_id"), line.get("source", "template"), 1 if line.get("withheld") else 0,
             line.get("withheld_reason", ""), line.get("withheld_by", ""), line.get("reason", ""),
+            line.get("source_line_id"),
         ),
     )
     return cur.lastrowid
@@ -781,7 +782,8 @@ def create_jobs(
     resolve to settings.default_quality_points, an empty label to the item name.
     Customisations (office): {template_line_id, withheld: true, reason} marks that snapshot
     line withheld; {item_id?, label, qty, reason} appends a line with source 'office'.
-    Status: delivery 'open' ('packing' and claimed when ad_hoc with a worker), rma 'intake'.
+    Status: delivery 'open' ('packing' and claimed when ad_hoc with a worker), rma 'intake'
+    (claimed when a worker is given).
 
     Raises KeyError (unknown template) or ValueError with a code: template_inactive,
     template_empty, bad_count, reason_required, unknown_template_line, unknown_item:<id>,
@@ -808,7 +810,8 @@ def create_jobs(
     default_points = default_quality_points(conn)
 
     stage = "pack" if kind == "delivery" else "intake"
-    claimed = ad_hoc and claimed_by is not None and kind == "delivery"
+    # A worker who starts a delivery ad hoc claims it; a worker who accepts an RMA always does.
+    claimed = claimed_by is not None and (ad_hoc or kind == "rma")
     status = ("packing" if claimed else "open") if kind == "delivery" else "intake"
     snapshot = []
     for line in template["lines"]:
@@ -1167,21 +1170,27 @@ def delete_worker_line(conn: sqlite3.Connection, line_id: int, commit: bool = Tr
 
 
 def claim_job(conn: sqlite3.Connection, job_id: int, worker_id: int, now: str, commit: bool = True) -> int | None:
-    """The worker takes the job (open -> packing; a colleague's claim is overwritten).
+    """The worker takes the job (a colleague's claim is overwritten).
 
+    Delivery: open -> packing. RMA: allowed in intake, repair and outgoing; the status stays.
     Returns the previous claimed_by (worker id or None) for the audit row. Raises KeyError or
-    ValueError('wrong_status') unless the job is a delivery in open or packing.
+    ValueError('wrong_status') in any other status.
     """
     job = get_job(conn, job_id)
     if job is None:
         raise KeyError(job_id)
-    if job["kind"] != "delivery" or job["status"] not in ("open", "packing"):
-        raise ValueError("wrong_status")
-    conn.execute(
-        "UPDATE jobs SET claimed_by = ?, claimed_at = ?, status = 'packing',"
-        " stage_changed_at = CASE WHEN status = 'packing' THEN stage_changed_at ELSE ? END WHERE id = ?",
-        (worker_id, now, now, job_id),
-    )
+    if job["kind"] == "delivery":
+        if job["status"] not in ("open", "packing"):
+            raise ValueError("wrong_status")
+        conn.execute(
+            "UPDATE jobs SET claimed_by = ?, claimed_at = ?, status = 'packing',"
+            " stage_changed_at = CASE WHEN status = 'packing' THEN stage_changed_at ELSE ? END WHERE id = ?",
+            (worker_id, now, now, job_id),
+        )
+    else:
+        if job["status"] not in ("intake", "repair", "outgoing"):
+            raise ValueError("wrong_status")
+        conn.execute("UPDATE jobs SET claimed_by = ?, claimed_at = ? WHERE id = ?", (worker_id, now, job_id))
     if commit:
         conn.commit()
     return job["claimed_by"]
@@ -1390,7 +1399,10 @@ def set_job_status(
 
     Allowed: packed|checked|shipped -> packing (delivery) / outgoing (rma), cancelled -> open
     (delivery) / intake (rma), any status except shipped and cancelled -> cancelled, rma outgoing ->
-    repair when no outgoing line was confirmed yet. A non-empty note is appended to the job note.
+    repair when no outgoing line was confirmed yet. Going back to repair (or reopening a cancelled
+    rma to intake) deletes the generated, still unconfirmed outgoing lines so generate_outgoing can
+    run again; a cancelled rma with confirmed outgoing lines cannot be reopened. A non-empty note is
+    appended to the job note.
     Raises KeyError, ValueError('outgoing_confirmed') or ValueError('bad_transition').
     """
     job = get_job(conn, job_id)
@@ -1408,6 +1420,8 @@ def set_job_status(
         allowed = kind == "delivery" and old == "cancelled"
     elif status == "intake":
         allowed = kind == "rma" and old == "cancelled"
+        if allowed and has_outgoing_confirmation(conn, job_id):
+            allowed = False
     elif status == "repair":
         allowed = kind == "rma" and old == "outgoing"
         if allowed and has_outgoing_confirmation(conn, job_id):
@@ -1416,6 +1430,8 @@ def set_job_status(
         allowed = False
     if not allowed:
         raise ValueError("bad_transition")
+    if kind == "rma" and status in ("repair", "intake"):
+        conn.execute("DELETE FROM job_lines WHERE job_id = ? AND stage = 'outgoing'", (job_id,))
     note = (note or "").strip()
     new_note = (job["note"] + "\n" + note).strip() if note else job["note"]
     conn.execute(
@@ -1424,3 +1440,279 @@ def set_job_status(
     if commit:
         conn.commit()
     return old
+
+
+# --- rma: repair notes, outgoing generation, balance ----------------------------------------
+
+REPAIR_ACTIONS = ("replaced", "kept", "added")
+# Statuses of an rma that is still in the house (not shipped, not cancelled).
+OPEN_RMA_STATUSES = ("intake", "repair", "outgoing", "packed", "checked")
+
+
+def _confirmed_qty(conn: sqlite3.Connection, line_id: int) -> int:
+    """Qty of the latest confirmation of a line (0 when it has none)."""
+    row = conn.execute(
+        "SELECT qty FROM confirmations WHERE job_line_id = ? ORDER BY id DESC LIMIT 1", (line_id,)
+    ).fetchone()
+    return row["qty"] if row else 0
+
+
+def _note_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "action": row["action"],
+        "job_line_id": row["job_line_id"],
+        "line_label": row["line_label"],
+        "item_id": row["item_id"],
+        "label": row["label"],
+        "qty": row["qty"],
+        "serial": row["serial"],
+        "reason": row["reason"],
+        "worker_id": row["worker_id"],
+        "worker_name": row["worker_name"],
+        "created_at": row["created_at"],
+    }
+
+
+_NOTE_SELECT = (
+    "SELECT n.*, l.label AS line_label, w.name AS worker_name FROM repair_notes n"
+    " LEFT JOIN job_lines l ON l.id = n.job_line_id JOIN workers w ON w.id = n.worker_id"
+)
+
+
+def get_repair_note(conn: sqlite3.Connection, note_id: int) -> dict | None:
+    row = conn.execute(_NOTE_SELECT + " WHERE n.id = ?", (note_id,)).fetchone()
+    return None if row is None else _note_dict(row)
+
+
+def list_repair_notes(conn: sqlite3.Connection, job_id: int) -> list[dict]:
+    """The repair notes of a job, oldest first, each with the label of its intake line (line_label)."""
+    rows = conn.execute(_NOTE_SELECT + " WHERE n.job_id = ? ORDER BY n.id", (job_id,)).fetchall()
+    return [_note_dict(r) for r in rows]
+
+
+def add_repair_note(
+    conn: sqlite3.Connection,
+    job_id: int,
+    worker_id: int,
+    action: str,
+    job_line_id: int | None,
+    item_id: str | None,
+    label: str,
+    qty: int,
+    serial: str,
+    reason: str,
+    now: str,
+    commit: bool = True,
+) -> int:
+    """Record what happened to a part during repair (rma status 'repair'). Returns the note id.
+
+    replaced / kept refer to an intake line of this job with a confirmed qty > 0: qty 1..confirmed;
+    kept needs a reason (customer agreement) and Σ kept qty per line must stay <= confirmed qty;
+    replaced keeps the qty in the outgoing list (reason optional). item_id / label default to those
+    of the intake line. added (a part that was not in the box, no line) needs label or item_id,
+    qty 1..999 and a reason. serial is optional (<= 64 characters).
+
+    Raises KeyError (unknown job) or ValueError with a code: wrong_status, invalid_request, bad_line,
+    bad_qty, reason_required, label_required, unknown_item:<id>.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["kind"] != "rma" or job["status"] != "repair":
+        raise ValueError("wrong_status")
+    if action not in REPAIR_ACTIONS:
+        raise ValueError("invalid_request")
+    if isinstance(qty, bool) or not isinstance(qty, int):
+        raise ValueError("bad_qty")
+    serial = serial.strip() if isinstance(serial, str) else None
+    reason = reason.strip() if isinstance(reason, str) else None
+    label = label.strip() if isinstance(label, str) else None
+    item_id = item_id.strip() if isinstance(item_id, str) else item_id
+    item_id = item_id or None
+    if (
+        serial is None or len(serial) > MAX_SERIAL or reason is None or len(reason) > MAX_REASON
+        or label is None or len(label) > MAX_NAME or (item_id is not None and (not isinstance(item_id, str)
+                                                                             or len(item_id) > 80))
+    ):
+        raise ValueError("invalid_request")
+    item_name = None
+    if item_id is not None:
+        item_name = item_names(conn, [item_id]).get(item_id)
+        if item_name is None:
+            raise ValueError(f"unknown_item:{item_id}")
+
+    if action == "added":
+        if job_line_id is not None:
+            raise ValueError("bad_line")
+        if not 1 <= qty <= MAX_QTY:
+            raise ValueError("bad_qty")
+        if len(reason) < MIN_REASON:
+            raise ValueError("reason_required")
+        label = label or (item_name or "").strip()[:MAX_NAME]
+        if not label:
+            raise ValueError("label_required")
+    else:
+        line = None
+        if isinstance(job_line_id, int) and not isinstance(job_line_id, bool):
+            line = get_line(conn, job_line_id)
+        if line is None or line["job_id"] != job_id or line["stage"] != "intake" or line["withheld"]:
+            raise ValueError("bad_line")
+        confirmed = _confirmed_qty(conn, job_line_id)
+        if confirmed < 1:
+            raise ValueError("bad_line")
+        if not 1 <= qty <= confirmed:
+            raise ValueError("bad_qty")
+        if action == "kept":
+            if len(reason) < MIN_REASON:
+                raise ValueError("reason_required")
+            kept = conn.execute(
+                "SELECT COALESCE(SUM(qty), 0) AS n FROM repair_notes WHERE job_line_id = ? AND action = 'kept'",
+                (job_line_id,),
+            ).fetchone()["n"]
+            if kept + qty > confirmed:
+                raise ValueError("bad_qty")
+        if item_id is None:
+            item_id = line["item_id"]
+        label = label or (item_name or "").strip()[:MAX_NAME] or line["label"]
+    cur = conn.execute(
+        "INSERT INTO repair_notes (job_id, job_line_id, action, item_id, label, qty, serial, reason, worker_id,"
+        " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (job_id, job_line_id, action, item_id, label, qty, serial, reason, worker_id, now),
+    )
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def delete_repair_note(conn: sqlite3.Connection, note_id: int, worker_id: int, commit: bool = True) -> dict:
+    """Remove a repair note; only its author, and only while the rma is in 'repair'. Returns the note.
+
+    Raises KeyError (unknown note) or ValueError: not_author, wrong_status.
+    """
+    note = get_repair_note(conn, note_id)
+    if note is None:
+        raise KeyError(note_id)
+    if note["worker_id"] != worker_id:
+        raise ValueError("not_author")
+    if get_job(conn, note["job_id"])["status"] != "repair":
+        raise ValueError("wrong_status")
+    conn.execute("DELETE FROM repair_notes WHERE id = ?", (note_id,))
+    if commit:
+        conn.commit()
+    return note
+
+
+def generate_outgoing(conn: sqlite3.Connection, job_id: int, now: str, commit: bool = True) -> list[int]:
+    """Build the outgoing list of an rma in 'repair' ("what came in goes out") and move it to 'outgoing'.
+
+    For every intake line with a latest confirmed qty > 0: out_qty = qty - Σ kept qty; if > 0 an
+    outgoing line (source_line_id = the intake line; source, item, label, instruction, photo /
+    serial flags and quality points copied; reason = the reasons of its 'replaced' notes as
+    "ersetzt: <reason>"). Withheld lines and lines that did not arrive give nothing. Every 'added'
+    note becomes an outgoing line with source 'worker', the note's reason, photo required and the
+    default quality points. Positions 1..n: intake order, then added notes. Returns the new line ids.
+
+    One-shot. Raises KeyError or ValueError: outgoing_exists (outgoing lines exist already),
+    wrong_status (not rma / not 'repair'), outgoing_empty (nothing to send back).
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if conn.execute("SELECT 1 FROM job_lines WHERE job_id = ? AND stage = 'outgoing' LIMIT 1", (job_id,)).fetchone():
+        raise ValueError("outgoing_exists")
+    if job["kind"] != "rma" or job["status"] != "repair":
+        raise ValueError("wrong_status")
+    notes = list_repair_notes(conn, job_id)
+    out_lines: list[dict] = []
+    for row, latest in get_job_lines(conn, job_id, "intake"):
+        confirmed = latest["qty"] if latest else 0
+        if row["withheld"] or confirmed < 1:
+            continue
+        mine = [n for n in notes if n["job_line_id"] == row["id"]]
+        out_qty = confirmed - sum(n["qty"] for n in mine if n["action"] == "kept")
+        if out_qty < 1:
+            continue
+        replaced = [f"ersetzt: {n['reason']}" if n["reason"] else "ersetzt" for n in mine if n["action"] == "replaced"]
+        out_lines.append(
+            {
+                "item_id": row["item_id"],
+                "photo_item_id": row["photo_item_id"],
+                "label": row["label"],
+                "instruction": row["instruction"],
+                "qty": out_qty,
+                "photo_required": bool(row["photo_required"]),
+                "serial_required": bool(row["serial_required"]),
+                "quality_points": _load_json(row["quality_points"], []),
+                "source": row["source"],
+                "reason": "; ".join(replaced),
+                "source_line_id": row["id"],
+            }
+        )
+    default_points = default_quality_points(conn)
+    for note in notes:
+        if note["action"] == "added":
+            out_lines.append(
+                {
+                    "item_id": note["item_id"],
+                    "photo_item_id": note["item_id"],
+                    "label": note["label"],
+                    "qty": note["qty"],
+                    "photo_required": True,
+                    "serial_required": False,
+                    "quality_points": list(default_points),
+                    "source": "worker",
+                    "reason": note["reason"],
+                }
+            )
+    if not out_lines:
+        raise ValueError("outgoing_empty")
+    ids = [_insert_line(conn, job_id, "outgoing", position, line) for position, line in enumerate(out_lines, 1)]
+    conn.execute("UPDATE jobs SET status = 'outgoing', stage_changed_at = ? WHERE id = ?", (now, job_id))
+    if commit:
+        conn.commit()
+    return ids
+
+
+_BALANCE_SELECT = """
+    SELECT l.id AS intake_line_id, l.item_id, l.label,
+           (SELECT c.qty FROM confirmations c WHERE c.job_line_id = l.id ORDER BY c.id DESC LIMIT 1) AS in_qty,
+           (SELECT COALESCE(SUM(n.qty), 0) FROM repair_notes n
+             WHERE n.job_line_id = l.id AND n.action = 'kept') AS kept_qty,
+           (SELECT COALESCE(SUM(COALESCE((SELECT c2.qty FROM confirmations c2 WHERE c2.job_line_id = o.id
+                                           ORDER BY c2.id DESC LIMIT 1), 0)), 0)
+              FROM job_lines o WHERE o.source_line_id = l.id AND o.stage = 'outgoing') AS out_qty
+    FROM job_lines l WHERE l.job_id = ? AND l.stage = 'intake' AND l.withheld = 0 ORDER BY l.position
+"""
+
+
+def rma_balance(conn: sqlite3.Connection, job_id: int) -> list[dict]:
+    """Per intake line that arrived (confirmed qty > 0): what came in, what stays, what went out.
+
+    [{intake_line_id, item_id, label, in_qty, kept_qty, out_qty, delta}]; out_qty = latest confirmed
+    qty of the outgoing line(s) made from it (0 while there is none or it is unconfirmed);
+    delta = in_qty - kept_qty - out_qty. delta > 0 means "in the house, not returned (yet)".
+    """
+    rows = conn.execute(_BALANCE_SELECT, (job_id,)).fetchall()
+    return [
+        {
+            "intake_line_id": r["intake_line_id"],
+            "item_id": r["item_id"],
+            "label": r["label"],
+            "in_qty": r["in_qty"],
+            "kept_qty": r["kept_qty"],
+            "out_qty": r["out_qty"],
+            "delta": r["in_qty"] - r["kept_qty"] - r["out_qty"],
+        }
+        for r in rows
+        if (r["in_qty"] or 0) > 0
+    ]
+
+
+def open_rma_balances(conn: sqlite3.Connection) -> list[dict]:
+    """[{job: job dict, lines: rma_balance}] of every rma not shipped or cancelled, oldest first."""
+    return [
+        {"job": job_to_dict(job), "lines": rma_balance(conn, job["id"])}
+        for job in list_jobs(conn, OPEN_RMA_STATUSES, kind="rma")
+    ]

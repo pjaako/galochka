@@ -214,9 +214,23 @@ def test_claim_refused_in_other_statuses(conn, status):
         repo.claim_job(conn, 9999, wid, NOW)
 
 
-def test_claim_refused_for_rma(conn):
+@pytest.mark.parametrize("status", ["intake", "repair", "outgoing"])
+def test_claim_rma_keeps_the_status(conn, status):
+    anna, bert = _worker(conn, "Anna"), _worker(conn, "Bert")
+    job_id = _job(conn, kind="rma", order_ref="R1")
+    conn.execute("UPDATE jobs SET status=?, stage_changed_at=? WHERE id=?", (status, NOW, job_id))
+    assert repo.claim_job(conn, job_id, anna, NOW) is None
+    assert repo.claim_job(conn, job_id, bert, LATER) == anna
+    job = repo.get_job(conn, job_id)
+    assert (job["status"], job["claimed_by"], job["claimed_at"], job["stage_changed_at"]) == (status, bert, LATER, NOW)
+
+
+@pytest.mark.parametrize("status", ["packed", "checked", "shipped", "cancelled", "open", "packing"])
+def test_claim_refused_for_rma_in_other_statuses(conn, status):
+    job_id = _job(conn, kind="rma", order_ref="R1")
+    conn.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
     with pytest.raises(ValueError, match="wrong_status"):
-        repo.claim_job(conn, _job(conn, kind="rma", order_ref="R1"), _worker(conn), NOW)
+        repo.claim_job(conn, job_id, _worker(conn), NOW)
 
 
 def test_delete_worker_line_rules(conn):

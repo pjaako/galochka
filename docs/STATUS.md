@@ -51,5 +51,11 @@ Updated: 2026-11-01
   `GET /api/jobs/{id}/label`, Dymo 36×89 mm box label print page (print verified as one
   page via PDF in the browser test). Suite: 534 passed, 2 skipped.
 
+- T7a (2026-11-01, Sonnet, reviewed): RMA backend. `POST /api/rma`, intake via the
+  normal confirmations, repair notes (replaced / kept / added, author-only delete),
+  `generate_outgoing` (what came in minus kept, plus added; one-shot, empty → 409 and the
+  expert cancels), outgoing stage reusing confirm/finish/check/ship, expert reopen rules,
+  `GET /api/expert/rma/open` with the in/kept/out/delta balance. Suite: 631 passed, 2 skipped.
+
 ## Next
-- T7a RMA backend.
+- T7b RMA UI + label.

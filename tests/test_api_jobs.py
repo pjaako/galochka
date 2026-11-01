@@ -732,7 +732,8 @@ def test_status_and_error_strings_exist():
         assert strings[f"status.{status}"]
     for code in ("photo_required", "reason_required", "bad_qty", "serial_count", "quality_not_ok", "line_withheld",
                  "wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate",
-                 "template_empty", "template_inactive", "unknown_template_line", "bad_count", "quality_incomplete"):
+                 "template_empty", "template_inactive", "unknown_template_line", "bad_count", "quality_incomplete",
+                 "bad_line", "not_author", "outgoing_exists", "outgoing_empty"):
         assert strings[f"error.{code}"], code
 
 

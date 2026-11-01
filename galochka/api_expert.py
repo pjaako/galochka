@@ -609,3 +609,10 @@ def update_job_status(job_id: int, body: JobStatusUpdate, request: Request):
             audit(conn, now, "expert", "job.status", "job", job_id,
                   {"from": old, "to": body.status, "note": body.note})
         return repo.job_to_dict(repo.get_job(conn, job_id))
+
+
+@router.get("/rma/open")
+def open_rma(request: Request):
+    """RMAs not shipped or cancelled with the in/kept/out balance per intake line (delta > 0 = still in the house)."""
+    with request.app.state.lock:
+        return repo.open_rma_balances(request.app.state.conn)

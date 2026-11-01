@@ -4,7 +4,7 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -48,9 +48,12 @@ def _read_upload(upload: UploadFile) -> bytes:
 # --- jobs: error mapping and request models (shared with api_expert) ------------------------
 
 # ValueError codes from repo that are state conflicts (409); every other code is a 400.
-_CONFLICT_CODES = {"wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate"}
+_CONFLICT_CODES = {
+    "wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate", "outgoing_exists",
+    "outgoing_empty",
+}
 # Rule violations about who may act (403).
-_FORBIDDEN_CODES = {"same_worker"}
+_FORBIDDEN_CODES = {"same_worker", "not_author"}
 
 
 def job_error(e: ValueError) -> HTTPException:
@@ -96,6 +99,26 @@ class JobCreateRequest(BaseModel):
     template_id: int
     order_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
     customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
+
+
+class RmaCreateRequest(BaseModel):
+    """RMA accepted by a worker; rma_no is the number from the other system."""
+
+    template_id: int
+    rma_no: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
+    customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
+
+
+class RepairNoteRequest(BaseModel):
+    """Loose on purpose: repo.add_repair_note owns the rules and answers with German 400 messages."""
+
+    action: Literal["replaced", "kept", "added"]
+    job_line_id: int | None = None
+    item_id: str | None = Field(default=None, max_length=200)
+    label: str = Field(default="", max_length=1000)
+    qty: int = 1
+    serial: str = Field(default="", max_length=1000)
+    reason: str = Field(default="", max_length=1000)
 
 
 class LineCreateRequest(BaseModel):
@@ -358,14 +381,33 @@ def create_app(settings: Settings) -> FastAPI:
                        "ad_hoc": True})
             return _job_dict(job_id)
 
-    @app.get("/api/jobs/{job_id}", dependencies=[Depends(require_worker_or_expert)])
-    def job_detail(job_id: int):
+    @app.post("/api/rma", status_code=201)
+    def create_rma(body: RmaCreateRequest, worker=Depends(require_worker)):
+        now = _now()
+        actor = f"worker:{worker['id']}"
+        with lock:
+            with db_write(conn):
+                (job_id,) = repo.create_jobs(
+                    conn, "rma", body.template_id, body.rma_no, body.customer, 1, [], actor, now,
+                    ad_hoc=True, claimed_by=worker["id"], commit=False,
+                )
+                audit(conn, now, actor, "job.create", "job", job_id,
+                      {"kind": "rma", "template_id": body.template_id, "order_ref": body.rma_no, "ad_hoc": True})
+            return _job_dict(job_id)
+
+    def _job_detail(job_id: int) -> dict | None:
+        """The job with the lines of its current stage (and the RMA data); None for an unknown job.
+
+        Reads under the lock, talks to Cassandra (reference photos) outside of it.
+        """
         now = _now()
         with lock:
             job = repo.get_job(conn, job_id)
             if job is None:
-                raise HTTPException(status_code=404, detail=t("error.not_found"))
+                return None
             lines = repo.get_job_lines(conn, job_id, repo.current_stage(job))
+            is_rma = job["kind"] == "rma"
+            intake = repo.get_job_lines(conn, job_id, "intake") if is_rma else []
             data = repo.job_to_dict(job)
             data["second_check"] = repo.second_check_applies(conn, job)
             data["attempt"] = job["attempt"]
@@ -373,20 +415,38 @@ def create_app(settings: Settings) -> FastAPI:
             data["packer_names"] = repo.packer_names(conn, job)
             data["packer_ids"] = [r["id"] for r in repo.current_confirmers(conn, job)]
             data["checks"] = repo.list_checks(conn, job_id)
+            data["repair_notes"] = repo.list_repair_notes(conn, job_id)
         # Cassandra calls (prefetch with a 2 s budget, then cache reads) happen outside the lock.
-        photo_ids = {row["photo_item_id"] or row["item_id"] for row, _ in lines} - {None}
+        photo_ids = {row["photo_item_id"] or row["item_id"] for row, _ in lines + intake} - {None}
         client = app.state.cassandra
         client.prefetch(conn, lock, sorted(photo_ids), now, budget_seconds=2.0)
         references = {i: client.reference_photos(conn, lock, i, now) for i in photo_ids}
-        data["lines"] = []
-        for row, latest in lines:
-            line = repo.line_to_dict(row, latest)
-            ref = references.get(row["photo_item_id"] or row["item_id"])
-            line["reference"] = (
-                {"photos": ref["photos"], "stale": ref["stale"]} if ref else {"photos": [], "stale": False}
-            )
-            data["lines"].append(line)
-        data["repair_notes"] = []  # filled by the RMA task
+
+        def dicts(pairs) -> list[dict]:
+            out = []
+            for row, latest in pairs:
+                line = repo.line_to_dict(row, latest)
+                ref = references.get(row["photo_item_id"] or row["item_id"])
+                line["reference"] = (
+                    {"photos": ref["photos"], "stale": ref["stale"]} if ref else {"photos": [], "stale": False}
+                )
+                out.append(line)
+            return out
+
+        data["lines"] = dicts(lines)
+        if is_rma:
+            data["intake_lines"] = dicts(intake)
+            in_qty = {row["id"]: (latest["qty"] if latest else 0) for row, latest in intake}
+            for line in data["lines"]:
+                if line["stage"] == "outgoing":
+                    line["in_qty"] = in_qty.get(line["source_line_id"])  # None for a part added during repair
+        return data
+
+    @app.get("/api/jobs/{job_id}", dependencies=[Depends(require_worker_or_expert)])
+    def job_detail(job_id: int):
+        data = _job_detail(job_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail=t("error.not_found"))
         return data
 
     @app.post("/api/jobs/{job_id}/claim")
@@ -538,6 +598,41 @@ def create_app(settings: Settings) -> FastAPI:
                 (settings.photos_dir / photo_path).unlink(missing_ok=True)
             raise
         return {"check": check, "job": job_json}
+
+    @app.post("/api/jobs/{job_id}/repair-notes", status_code=201)
+    def add_repair_note(job_id: int, body: RepairNoteRequest, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                note_id = repo.add_repair_note(
+                    conn, job_id, worker["id"], body.action, body.job_line_id, body.item_id, body.label, body.qty,
+                    body.serial, body.reason, now, commit=False,
+                )
+                note = repo.get_repair_note(conn, note_id)
+                audit(conn, now, f"worker:{worker['id']}", "repair.note", "job", job_id,
+                      {k: note[k] for k in ("id", "action", "job_line_id", "item_id", "label", "qty", "serial",
+                                            "reason")})
+            return note
+
+    @app.delete("/api/repair-notes/{note_id}", status_code=204)
+    def delete_repair_note(note_id: int, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                note = repo.delete_repair_note(conn, note_id, worker["id"], commit=False)
+                audit(conn, now, f"worker:{worker['id']}", "repair.note_delete", "job", note["job_id"],
+                      {k: note[k] for k in ("id", "action", "job_line_id", "label", "qty", "reason")})
+        return Response(status_code=204)
+
+    @app.post("/api/jobs/{job_id}/outgoing")
+    def generate_outgoing(job_id: int, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                line_ids = repo.generate_outgoing(conn, job_id, now, commit=False)
+                audit(conn, now, f"worker:{worker['id']}", "job.outgoing", "job", job_id,
+                      {"line_ids": line_ids, "lines": len(line_ids)})
+        return _job_detail(job_id)
 
     @app.get("/api/jobs/{job_id}/qr.svg")
     def job_qr(job_id: int):
