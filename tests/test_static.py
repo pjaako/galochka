@@ -109,12 +109,8 @@ def test_worker_pages_have_nav_skeleton(client):
         assert 'id="nav-logout"' in html and 'data-i18n="nav.logout"' in html
 
 
-def test_stub_pages_check_the_session_and_redirect_to_login(client):
-    for path in ("/rma/1",):
-        html = client.get(path).text
-        assert 'data-i18n="common.not_available"' in html
-        assert "C.loadMe()" in html and "C.goLogin()" in html, path
-    for path in ("/auftraege", "/packen/1", "/pruefen/1"):
+def test_worker_pages_check_the_session_and_redirect_to_login(client):
+    for path in ("/auftraege", "/packen/1", "/pruefen/1", "/rma/1"):
         html = client.get(path).text
         assert 'data-i18n="common.not_available"' not in html, path
         assert "C.loadMe()" in html and "C.goLogin()" in html, path
@@ -312,11 +308,13 @@ def test_template_and_bom_strings_exist_in_german():
 def test_auftraege_page_markup(client):
     html = client.get("/auftraege").text
     for element_id in ("new-job-btn", "rma-btn", "new-job-form", "new-template", "new-order", "new-customer",
-                       "filter-all", "filter-mine", "job-list"):
+                       "filter-all", "filter-mine", "job-list", "rma-form", "rma-template", "rma-no", "rma-customer",
+                       "rma-submit"):
         assert f'id="{element_id}"' in html, element_id
-    # RMA creation arrives with version 2: the button is disabled and carries the hint
-    assert re.search(r'<button[^>]*id="rma-btn"[^>]*\bdisabled\b', html)
-    assert 'data-i18n="jobs.rma_hint"' in html
+    # "RMA annehmen" is live: enabled button, inline form posting to /api/rma
+    assert not re.search(r'<button[^>]*id="rma-btn"[^>]*\bdisabled\b', html)
+    assert 'data-i18n="jobs.rma_hint"' not in html
+    assert '"/api/rma"' in html and "rma_no:" in html and '"/rma/" + job.id' in html
     for key in ("jobs.new", "jobs.rma", "jobs.filter_all", "jobs.filter_mine", "jobs.create"):
         assert f'data-i18n="{key}"' in html, key
     assert "/api/jobs?status=" in html and "/api/templates" in html and "/api/jobs/" in html
@@ -325,11 +323,19 @@ def test_auftraege_page_markup(client):
     assert '"status." + job.status' in html
 
 
+def _packen_source(client) -> str:
+    """packen.html plus the shared line-by-line component it loads."""
+    return client.get("/packen/7").text + client.get("/static/lines.js").text
+
+
 def test_packen_page_markup(client):
-    html = client.get("/packen/7").text
+    page = client.get("/packen/7").text
+    assert '<script src="/static/lines.js"></script>' in page and "Lines.mount(" in page
+    assert page.index("/static/app.js") < page.index("/static/lines.js")
+    html = _packen_source(client)
     for element_id in ("pack-head", "pack-progress", "pack-bar-fill", "pack-strip", "pack-body", "pack-actions"):
-        assert f'id="{element_id}"' in html, element_id
-    assert 'class="progress-bar"' in html
+        assert f'"{element_id}"' in html, element_id
+    assert '"progress-bar"' in html
     # camera only through a file input (plain HTTP), photo downscaled before upload
     assert 'accept = "image/*"' in html and 'setAttribute("capture", "environment")' in html
     assert "C.downscaleImage(draft.photo, 1600, 0.9)" in html
@@ -353,7 +359,7 @@ def test_packen_and_job_strings_exist_in_german():
     assert strings["pack.no_reference"] == "Foto in Cassandra erfassen"
     assert strings["pack.done_second_check"].startswith("Gepackt")
     # keys passed around as plain string literals in the job pages exist
-    for name in ("packen.html", "auftraege.html", "experte.html"):
+    for name in ("packen.html", "lines.js", "auftraege.html", "experte.html", "rma.html"):
         text = (STATIC_DIR / name).read_text(encoding="utf-8")
         keys = set(re.findall(r'"((?:pack|jobs)\.[\w]+)"', text)) | set(re.findall(r'"(expert\.job[s]?_[\w]+)"', text))
         for key in keys:
@@ -440,3 +446,98 @@ def test_check_and_label_strings_exist_in_german():
         text = (STATIC_DIR / name).read_text(encoding="utf-8")
         for key in set(re.findall(r'"((?:check|label)\.[\w]+)"', text)):
             assert key in strings, (name, key)
+
+
+def test_lines_component_is_served_and_shared_by_packen_and_rma(client):
+    resp = client.get("/static/lines.js")
+    assert resp.status_code == 200 and "javascript" in resp.headers["content-type"]
+    assert resp.headers["cache-control"] == "no-cache"
+    js = resp.text
+    assert "window.Lines = { mount: mount" in js and "function mount(container, job, options)" in js
+    for banned in ("getUserMedia", "serviceWorker", "navigator.clipboard", "innerHTML"):
+        assert banned not in js, banned
+    # the camera path stays a file input
+    assert 'setAttribute("capture", "environment")' in js
+    for path in ("/packen/1", "/rma/1"):
+        html = client.get(path).text
+        assert '<script src="/static/lines.js"></script>' in html, path
+        assert "Lines.mount(" in html, path
+        assert html.index("/static/app.js") < html.index("/static/lines.js"), path
+    # the 600-line component lives once: packen.html no longer carries its own copy
+    assert "function renderLineView" not in client.get("/packen/1").text
+    assert "function renderLineView" not in client.get("/rma/1").text
+
+
+def test_packen_page_handles_the_rma_return(client):
+    html = client.get("/packen/1").text
+    assert 'C.t("rma.head_outgoing")' in html
+    assert "pack.rma_done_second_check" in html and "pack.rma_done_released" in html
+    assert '"/rma/" + job.id' in html  # intake / repair jobs are sent to the RMA page
+    js = client.get("/static/lines.js").text
+    assert 'C.t("pack.rma_in_qty")' in js and "line.in_qty" in js
+
+
+def test_rma_page_markup(client):
+    html = client.get("/rma/7").text
+    for element_id in ("rma-head", "rma-order", "rma-body", "rma-lines"):
+        assert f'id="{element_id}"' in html, element_id
+    # all four stages are handled; the outgoing hand-off goes to Packen
+    for needle in ("/repair-notes", "/api/repair-notes/", "/outgoing", '"/packen/"', '"/pruefen/"',
+                   '"/druck/etikett/"', "Lines.itemPicker", "Lines.mount"):
+        assert needle in html, needle
+    assert 'el("details"' in html and 'el("summary"' in html
+    # intake actions are relabelled through string keys, never hard-coded German
+    for key in ("rma.in_ok", "rma.in_missing", "rma.in_notok", "rma.in_extra", "rma.in_finish", "rma.prepare",
+                "rma.act_replaced", "rma.act_kept", "rma.add_part", "rma.note_delete"):
+        assert f'"{key}"' in html, key
+    assert "C.loadMe()" in html and "C.goLogin()" in html and "/claim" in html
+    for banned in ("getUserMedia", "serviceWorker", "navigator.clipboard", "innerHTML"):
+        assert banned not in html, banned
+
+
+def test_rma_strings_exist_in_german():
+    strings = _strings()
+    expected = {
+        "rma.in_ok": "Angekommen",
+        "rma.in_missing": "Fehlt / unvollständig",
+        "rma.in_notok": "Beschädigt",
+        "rma.in_extra": "Weiteres Teil gefunden",
+        "rma.in_finish": "Eingang abschließen",
+        "rma.act_replaced": "Ersetzt",
+        "rma.act_kept": "Einbehalten",
+        "rma.prepare": "Rücksendung vorbereiten",
+        "jobs.rma_intake": "Eingang prüfen",
+        "jobs.rma_pack": "Rücksendung packen",
+        "pack.rma_done_released": "Rücksendung gepackt und freigegeben",
+    }
+    for key, text in expected.items():
+        assert strings[key] == text, key
+    assert strings["rma.head"] == "RMA {ref}" and strings["rma.head_outgoing"] == "RMA {ref} – Rücksendung"
+    assert "Experten" in strings["error.outgoing_empty"]
+    # keys passed as plain literals in the RMA code exist (rma.act_* / rma.info_* are completed at runtime)
+    for name in ("rma.html", "lines.js", "auftraege.html", "packen.html"):
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        for key in set(re.findall(r'"((?:rma|pack|jobs)\.[\w]+)"', text)):
+            if not key.endswith("_"):
+                assert key in strings, (name, key)
+    for status in ("outgoing", "packed", "checked", "shipped", "cancelled"):
+        assert f"rma.info_{status}" in strings
+    for action in ("replaced", "kept", "added"):
+        assert f"rma.act_{action}" in strings
+
+
+def test_auftraege_rma_cards_lead_to_the_right_page(client):
+    html = client.get("/auftraege").text
+    for key in ("jobs.rma_intake", "jobs.rma_repair", "jobs.rma_pack"):
+        assert f'"{key}"' in html, key
+    assert 'job.kind === "rma" ? C.fmt(C.t("rma.head")' in html
+    assert '"jobs.rma_open"' not in html
+
+
+def test_druck_rma_label_shows_only_a_present_check(client):
+    html = client.get("/druck/etikett/7").text
+    assert 'C.t("label.rma")' in html
+    # an RMA label never prints the packers; "geprüft" only when there is a checker
+    rma_branch = html.split("if (rma) {", 1)[1].split("} else {", 1)[0]
+    assert "label.checked" in rma_branch and "data.checked_by" in rma_branch
+    assert "label.packed" not in rma_branch and "label.unchecked" not in rma_branch

@@ -6,7 +6,7 @@
   <title data-i18n="rma.title">galochka</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="pack">
   <nav class="nav">
     <img src="/static/acs_logo.png" alt="ACS" width="32" height="32" class="nav__logo">
     <span class="nav__brand" data-i18n="nav.brand"></span>
@@ -17,24 +17,517 @@
     <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
   </nav>
   <main class="main">
-    <h1 data-i18n="rma.title"></h1>
-    <p class="note" data-i18n="common.not_available"></p>
+    <!-- Head of the repair and read-only views; the intake view has the head of the Lines component. -->
+    <header class="pack-head" id="rma-head" hidden>
+      <h1 class="pack-head__order" id="rma-order"></h1>
+      <p class="pack-head__meta" id="rma-meta"></p>
+    </header>
+    <div id="rma-body"></div>
+    <div id="rma-lines" hidden></div>
   </main>
 
   <script src="/static/app.js"></script>
+  <script src="/static/lines.js"></script>
   <script>
     (function () {
+      var jobId = parseInt(window.location.pathname.split("/").pop(), 10);
+
+      var me = null;
+      var job = null; // GET /api/jobs/{id}
+      var form = null; // the open repair form: {kind: "replaced" | "kept" | "added", lineId}
+      var busy = false;
+
+      var headEl = document.getElementById("rma-head");
+      var orderEl = document.getElementById("rma-order");
+      var metaEl = document.getElementById("rma-meta");
+      var bodyEl = document.getElementById("rma-body");
+      var linesEl = document.getElementById("rma-lines");
+
+      function reportError(err) {
+        C.toast((err && err.detail) || C.t("error.generic"));
+      }
+
+      function clearNode(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+      }
+
+      function el(tagName, className, text) {
+        var node = document.createElement(tagName);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function button(label, className, onClick) {
+        var btn = el("button", "btn " + (className || ""), label);
+        btn.type = "button";
+        if (onClick) btn.addEventListener("click", onClick);
+        return btn;
+      }
+
+      function link(label, className, href) {
+        var a = el("a", "btn " + (className || ""), label);
+        a.href = href;
+        return a;
+      }
+
+      function field(labelText, control) {
+        var box = el("div", "field");
+        box.appendChild(el("label", "field__label", labelText));
+        box.appendChild(control);
+        return box;
+      }
+
+      function textInput(max) {
+        var input = el("input", "input-id");
+        input.type = "text";
+        input.maxLength = max;
+        input.setAttribute("autocomplete", "off");
+        return input;
+      }
+
+      function qtyInput(value, max) {
+        var input = el("input", "input-id");
+        input.type = "number";
+        input.min = "1";
+        input.max = String(max);
+        input.value = String(value);
+        input.setAttribute("inputmode", "numeric");
+        return input;
+      }
+
+      function reasonInput() {
+        var area = el("textarea", "input-id");
+        area.rows = 2;
+        area.maxLength = 200;
+        return area;
+      }
+
+      // --- data helpers ---------------------------------------------------------------------
+
+      async function load() {
+        job = await C.api("/api/jobs/" + jobId);
+      }
+
+      function intakeLines() {
+        return job.intake_lines || [];
+      }
+
+      function notes() {
+        return job.repair_notes || [];
+      }
+
+      // What arrived of an intake line (the latest confirmation's quantity).
+      function inQty(line) {
+        return line.latest ? line.latest.qty : 0;
+      }
+
+      function noteQty(line, action) {
+        var sum = 0;
+        notes().forEach(function (note) {
+          if (note.job_line_id === line.id && note.action === action) sum += note.qty;
+        });
+        return sum;
+      }
+
+      // The same rule as repo.generate_outgoing: in - kept per arrived line, plus every added part.
+      function outgoingPreview() {
+        var items = [];
+        intakeLines().forEach(function (line) {
+          if (line.withheld) return;
+          var out = inQty(line) - noteQty(line, "kept");
+          if (inQty(line) >= 1 && out >= 1) items.push(line.label + " × " + out);
+        });
+        notes().forEach(function (note) {
+          if (note.action === "added") {
+            items.push(note.label + " × " + note.qty + " (" + C.t("rma.outgoing_added") + ")");
+          }
+        });
+        return items;
+      }
+
+      function stateOf(line) {
+        if (line.withheld) return "withheld";
+        return line.latest ? line.latest.result : "open";
+      }
+
+      function stateBadge(state) {
+        return el("span", "state-badge state-badge--" + state, C.t("pack.state_" + state));
+      }
+
+      function metaText(parts) {
+        return parts.filter(Boolean).join(" · ");
+      }
+
+      // --- head -----------------------------------------------------------------------------
+
+      function renderHead(stageText) {
+        headEl.hidden = false;
+        orderEl.textContent = C.fmt(C.t("rma.head"), { ref: job.order_ref });
+        metaEl.textContent = metaText([job.customer, job.template_name, stageText]);
+      }
+
+      // --- intake: the Lines component ------------------------------------------------------
+
+      function showIntake() {
+        headEl.hidden = true;
+        bodyEl.hidden = true;
+        linesEl.hidden = false;
+        Lines.mount(linesEl, job, {
+          editable: true,
+          title: C.fmt(C.t("rma.head"), { ref: job.order_ref }),
+          meta: metaText([job.customer, job.template_name, C.t("rma.stage_intake")]),
+          keys: {
+            action_ok: "rma.in_ok",
+            action_missing: "rma.in_missing",
+            action_notok: "rma.in_notok",
+            missing_title: "rma.in_missing_title",
+            notok_title: "rma.in_notok_title",
+            send_notok: "rma.in_send_notok",
+            extra: "rma.in_extra",
+            extra_title: "rma.in_extra_title",
+            extra_help: "rma.in_extra_help",
+            summary_title: "rma.in_summary",
+            finish: "rma.in_finish",
+          },
+          onFinish: async function () {
+            try {
+              await load();
+            } catch (err) {
+              reportError(err);
+              return;
+            }
+            window.scrollTo(0, 0);
+            render();
+          },
+        });
+      }
+
+      // --- the compact intake list (repair view and read-only folds) ---------------------------
+
+      function buildIntakeRow(line, withActions) {
+        var state = stateOf(line);
+        var row = el("div", "rma-line rma-line--" + state);
+        row.setAttribute("data-line-id", String(line.id));
+        var head = el("div", "rma-line__head");
+        head.appendChild(el("span", "rma-line__label", line.label + " × " + line.qty));
+        head.appendChild(stateBadge(state));
+        row.appendChild(head);
+        var arrived = inQty(line);
+        var meta = [line.item_id];
+        if (state === "withheld") {
+          meta.push(C.t("rma.withheld"));
+        } else if (line.latest) {
+          meta.push(C.fmt(C.t("pack.by"), { name: line.latest.worker_name }));
+          meta.push(arrived >= 1 ? C.fmt(C.t("rma.in_of"), { n: arrived, total: line.qty }) : C.t("rma.not_arrived"));
+          if (line.latest.reason) meta.push(C.fmt(C.t("pack.reason_line"), { reason: line.latest.reason }));
+        }
+        if (line.source === "worker") meta.push(C.t("pack.source_worker"));
+        row.appendChild(el("div", "rma-line__meta", metaText(meta)));
+
+        var kept = noteQty(line, "kept");
+        var replaced = noteQty(line, "replaced");
+        if (kept || replaced) {
+          var chips = el("div", "job-tags");
+          if (replaced) chips.appendChild(el("span", "tag", C.fmt(C.t("rma.replaced_chip"), { n: replaced })));
+          if (kept) chips.appendChild(el("span", "tag tag--warn", C.fmt(C.t("rma.kept_chip"), { n: kept })));
+          row.appendChild(chips);
+        }
+        if (withActions && state !== "withheld" && arrived >= 1) {
+          var actions = el("div", "rma-line__actions");
+          var replaceBtn = button(C.t("rma.act_replaced"), "btn--secondary", function () { openForm("replaced", line.id); });
+          var keepBtn = button(C.t("rma.act_kept"), "btn--secondary", function () { openForm("kept", line.id); });
+          replaceBtn.setAttribute("data-action", "replaced");
+          keepBtn.setAttribute("data-action", "kept");
+          keepBtn.disabled = arrived - kept < 1;
+          actions.appendChild(replaceBtn);
+          actions.appendChild(keepBtn);
+          row.appendChild(actions);
+          if (form && form.lineId === line.id) row.appendChild(buildNoteForm(line));
+        }
+        return row;
+      }
+
+      // --- repair note forms -----------------------------------------------------------------
+
+      function openForm(kind, lineId) {
+        form = { kind: kind, lineId: lineId };
+        render();
+      }
+
+      function closeForm() {
+        form = null;
+        render();
+      }
+
+      async function saveNote(body) {
+        if (busy) return;
+        busy = true;
+        try {
+          await C.api("/api/jobs/" + jobId + "/repair-notes", { body: body });
+          await load();
+          form = null;
+          busy = false;
+          C.toast(C.t("rma.note_saved"));
+          render();
+        } catch (err) {
+          busy = false;
+          reportError(err);
+        }
+      }
+
+      // Mirrors repo.add_repair_note for replaced / kept; the server stays the authority.
+      function buildNoteForm(line) {
+        var kept = form.kind === "kept";
+        var max = inQty(line) - (kept ? noteQty(line, "kept") : 0);
+        var box = el("div", "rma-form");
+        box.setAttribute("data-form", form.kind);
+        var qty = qtyInput(1, Math.max(1, max));
+        var serial = textInput(64);
+        var reason = reasonInput();
+        box.appendChild(field(C.t(kept ? "rma.act_kept" : "rma.act_replaced") + " – " + C.t("rma.form_qty"), qty));
+        if (!kept) box.appendChild(field(C.t("rma.form_serial"), serial));
+        box.appendChild(field(C.t(kept ? "rma.form_reason_required" : "rma.form_reason_optional"), reason));
+        var actions = el("div", "rma-form__actions");
+        actions.appendChild(button(C.t("rma.form_cancel"), "", closeForm));
+        actions.appendChild(button(C.t("rma.form_save"), "btn--primary", function () {
+          var n = parseInt(qty.value, 10);
+          if (!(n >= 1 && n <= max)) {
+            C.toast(C.t("error.bad_qty"));
+            return;
+          }
+          var text = reason.value.trim();
+          if ((kept || text) && text.length < 3) {
+            C.toast(C.t("error.reason_required"));
+            return;
+          }
+          saveNote({
+            action: form.kind, job_line_id: line.id, qty: n, serial: kept ? "" : serial.value.trim(), reason: text,
+          });
+        }));
+        box.appendChild(actions);
+        return box;
+      }
+
+      // "Teil hinzufügen": a part that was not in the box (no intake line).
+      function buildAddForm() {
+        var box = el("div", "rma-form");
+        box.setAttribute("data-form", "added");
+        var picked = null;
+        var label = textInput(120);
+        var qty = qtyInput(1, 999);
+        var reason = reasonInput();
+        var picker = Lines.itemPicker(function (item) {
+          picked = item;
+          if (item && !label.value.trim()) label.value = item.name;
+        });
+        box.appendChild(field(C.t("pack.extra_item"), picker));
+        box.appendChild(field(C.t("pack.extra_label"), label));
+        box.appendChild(field(C.t("pack.extra_qty"), qty));
+        box.appendChild(field(C.t("pack.extra_reason"), reason));
+        var actions = el("div", "rma-form__actions");
+        actions.appendChild(button(C.t("rma.form_cancel"), "", closeForm));
+        actions.appendChild(button(C.t("rma.form_save"), "btn--primary", function () {
+          var text = label.value.trim() || (picked ? picked.name : "");
+          var n = parseInt(qty.value, 10);
+          var why = reason.value.trim();
+          if (!text) {
+            C.toast(C.t("pack.extra_label_required"));
+            return;
+          }
+          if (!(n >= 1 && n <= 999)) {
+            C.toast(C.t("error.bad_qty"));
+            return;
+          }
+          if (why.length < 3) {
+            C.toast(C.t("error.reason_required"));
+            return;
+          }
+          saveNote({ action: "added", item_id: picked ? picked.item_id : null, label: text, qty: n, reason: why });
+        }));
+        box.appendChild(actions);
+        return box;
+      }
+
+      // --- notes ---------------------------------------------------------------------------------
+
+      async function deleteNote(note) {
+        if (busy) return;
+        if (!window.confirm(C.fmt(C.t("rma.note_delete_confirm"), { label: note.label }))) return;
+        busy = true;
+        try {
+          await C.api("/api/repair-notes/" + note.id, { method: "DELETE" });
+          await load();
+          busy = false;
+          render();
+        } catch (err) {
+          busy = false;
+          reportError(err);
+        }
+      }
+
+      function buildNoteRow(note, withDelete) {
+        var row = el("div", "rma-note");
+        row.setAttribute("data-note-id", String(note.id));
+        var head = el("div", "rma-line__head");
+        head.appendChild(el("span", "rma-line__label", note.label + " × " + note.qty));
+        head.appendChild(el("span", "state-badge state-badge--note-" + note.action, C.t("rma.act_" + note.action)));
+        row.appendChild(head);
+        var meta = [C.fmt(C.t("rma.note_by"), { name: note.worker_name })];
+        if (note.serial) meta.push(C.fmt(C.t("rma.note_serial"), { serial: note.serial }));
+        if (note.reason) meta.push(C.fmt(C.t("rma.note_reason"), { reason: note.reason }));
+        row.appendChild(el("div", "rma-line__meta", metaText(meta)));
+        if (withDelete && me && note.worker_id === me.id) {
+          var del = button(C.t("rma.note_delete"), "btn--danger btn--inline", function () { deleteNote(note); });
+          del.setAttribute("data-delete-note", String(note.id));
+          row.appendChild(del);
+        }
+        return row;
+      }
+
+      function buildNotesList(withDelete) {
+        var list = el("div", "rma-notes");
+        if (!notes().length) list.appendChild(el("p", "field__help", C.t("rma.notes_empty")));
+        notes().forEach(function (note) { list.appendChild(buildNoteRow(note, withDelete)); });
+        return list;
+      }
+
+      // --- views -----------------------------------------------------------------------------------
+
+      function section(titleKey, id) {
+        var box = el("section", "rma-section");
+        if (id) box.id = id;
+        box.appendChild(el("h2", "", C.t(titleKey)));
+        return box;
+      }
+
+      function renderRepair() {
+        renderHead(C.t("rma.stage_repair"));
+
+        var intake = section("rma.intake_section", "rma-intake");
+        var list = el("div", "rma-list");
+        intakeLines().forEach(function (line) { list.appendChild(buildIntakeRow(line, true)); });
+        intake.appendChild(list);
+        bodyEl.appendChild(intake);
+
+        var added = section("rma.added_section", "rma-added");
+        if (form && form.kind === "added") {
+          added.appendChild(buildAddForm());
+        } else {
+          added.appendChild(button(C.t("rma.add_part"), "btn--secondary", function () { openForm("added", null); }));
+        }
+        bodyEl.appendChild(added);
+
+        var noteBox = section("rma.notes_section", "rma-notes-section");
+        noteBox.appendChild(buildNotesList(true));
+        bodyEl.appendChild(noteBox);
+
+        var out = section("rma.outgoing_title", "rma-outgoing");
+        var items = outgoingPreview();
+        var preview = el("p", "rma-preview", C.fmt(C.t("rma.outgoing_preview"), {
+          list: items.length ? items.join(", ") : C.t("rma.outgoing_none"),
+        }));
+        preview.id = "rma-preview";
+        out.appendChild(preview);
+        if (!items.length) out.appendChild(el("p", "note", C.t("error.outgoing_empty")));
+        out.appendChild(el("p", "field__help", C.t("rma.prepare_help")));
+        var prepare = button(C.t("rma.prepare"), "btn--primary", prepareOutgoing);
+        prepare.id = "rma-prepare";
+        out.appendChild(prepare);
+        bodyEl.appendChild(out);
+      }
+
+      async function prepareOutgoing() {
+        if (busy) return;
+        busy = true;
+        try {
+          await C.api("/api/jobs/" + jobId + "/outgoing", { method: "POST" });
+          window.location.href = "/packen/" + jobId;
+        } catch (err) {
+          busy = false;
+          reportError(err); // 409 outgoing_empty carries the hint to cancel the RMA in the expert area
+        }
+      }
+
+      // A collapsed, read-only section for the stages that are over.
+      function fold(titleKey, content, id) {
+        var box = el("details", "rma-fold");
+        box.id = id;
+        box.appendChild(el("summary", "", C.t(titleKey)));
+        box.appendChild(content);
+        return box;
+      }
+
+      function renderFolds() {
+        var list = el("div", "rma-list");
+        intakeLines().forEach(function (line) { list.appendChild(buildIntakeRow(line, false)); });
+        bodyEl.appendChild(fold("rma.intake_section", list, "rma-fold-intake"));
+        bodyEl.appendChild(fold("rma.notes_section", buildNotesList(false), "rma-fold-notes"));
+      }
+
+      function renderOther() {
+        renderHead(C.t("status." + job.status));
+        var info = el("div", "pack-result" + (job.status === "packed" || job.status === "cancelled" ? " pack-result--check" : ""));
+        var infoKey = "rma.info_" + job.status;
+        info.appendChild(el("p", "", C.fmt(C.t("rma.status_line"), { status: C.t("status." + job.status) })));
+        info.appendChild(el("p", "rma-info", C.t(infoKey)));
+        if (job.status === "outgoing") info.appendChild(link(C.t("rma.go_pack"), "btn--primary", "/packen/" + jobId));
+        if (job.status === "packed") info.appendChild(link(C.t("rma.go_check"), "btn--primary", "/pruefen/" + jobId));
+        if (job.status === "checked" || job.status === "shipped") {
+          var label = link(C.t("rma.go_label"), "btn--secondary", "/druck/etikett/" + jobId);
+          label.target = "_blank";
+          label.rel = "noopener";
+          info.appendChild(label);
+        }
+        bodyEl.appendChild(info);
+        renderFolds();
+      }
+
+      function render() {
+        clearNode(bodyEl);
+        bodyEl.hidden = false;
+        linesEl.hidden = true;
+        if (job.status === "intake") {
+          showIntake();
+        } else if (job.status === "repair") {
+          renderRepair();
+        } else {
+          renderOther();
+        }
+      }
+
       async function init() {
         try {
           await C.loadStrings();
         } catch (err) {
           C.toast(C.t("error.generic"));
         }
-        // No valid session: go to the badge login and come back here afterwards.
-        var worker = await C.loadMe();
-        if (!worker) {
+        me = await C.loadMe();
+        if (!me) {
           C.goLogin();
+          return;
         }
+        try {
+          await load();
+          // Whoever opens the RMA takes it over (claim is allowed at every worker stage).
+          var working = job.status === "intake" || job.status === "repair" || job.status === "outgoing";
+          if (job.kind === "rma" && working && job.claimed_by !== me.id) {
+            try {
+              await C.api("/api/jobs/" + jobId + "/claim", { method: "POST" });
+              await load();
+            } catch (err) {
+              reportError(err);
+            }
+          }
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        if (job.kind !== "rma") {
+          window.location.href = "/packen/" + job.id;
+          return;
+        }
+        render();
       }
       init();
     })();

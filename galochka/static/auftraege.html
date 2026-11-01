@@ -21,8 +21,7 @@
 
     <div class="job-toolbar">
       <button type="button" id="new-job-btn" class="btn btn--primary" data-i18n="jobs.new"></button>
-      <button type="button" id="rma-btn" class="btn btn--secondary" data-i18n="jobs.rma" disabled></button>
-      <p class="job-hint" data-i18n="jobs.rma_hint"></p>
+      <button type="button" id="rma-btn" class="btn btn--secondary" data-i18n="jobs.rma"></button>
     </div>
 
     <form id="new-job-form" class="job-form settings-section" hidden>
@@ -42,6 +41,26 @@
       <div class="form-actions tpl-editor__actions">
         <button type="button" id="new-job-cancel" class="btn" data-i18n="jobs.cancel"></button>
         <button type="submit" id="new-job-submit" class="btn btn--primary" data-i18n="jobs.create"></button>
+      </div>
+    </form>
+
+    <form id="rma-form" class="job-form settings-section" hidden>
+      <h2 data-i18n="jobs.rma_form_title"></h2>
+      <div class="field">
+        <label class="field__label" for="rma-template" data-i18n="jobs.template"></label>
+        <select id="rma-template" class="select"></select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="rma-no" data-i18n="jobs.rma_no"></label>
+        <input type="text" id="rma-no" class="input-id" maxlength="40" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field__label" for="rma-customer" data-i18n="jobs.customer"></label>
+        <input type="text" id="rma-customer" class="input-id" maxlength="80" autocomplete="off">
+      </div>
+      <div class="form-actions tpl-editor__actions">
+        <button type="button" id="rma-cancel" class="btn" data-i18n="jobs.cancel"></button>
+        <button type="submit" id="rma-submit" class="btn btn--primary" data-i18n="jobs.rma_create"></button>
       </div>
     </form>
 
@@ -74,6 +93,12 @@
       var newOrder = document.getElementById("new-order");
       var newCustomer = document.getElementById("new-customer");
       var newSubmit = document.getElementById("new-job-submit");
+      var rmaBtn = document.getElementById("rma-btn");
+      var rmaForm = document.getElementById("rma-form");
+      var rmaTemplate = document.getElementById("rma-template");
+      var rmaNo = document.getElementById("rma-no");
+      var rmaCustomer = document.getElementById("rma-customer");
+      var rmaSubmit = document.getElementById("rma-submit");
       var filterAll = document.getElementById("filter-all");
       var filterMine = document.getElementById("filter-mine");
       var templatesLoaded = false;
@@ -143,8 +168,13 @@
           box.appendChild(actionButton(C.t("jobs.pack"), "btn--primary", function () { startPacking(job); }));
         } else if (job.status === "packed") {
           box.appendChild(actionLink(C.t("jobs.check"), "btn--primary", "/pruefen/" + job.id));
-        } else if (job.status === "intake" || job.status === "repair" || job.status === "outgoing") {
-          box.appendChild(actionLink(C.t("jobs.rma_open"), "btn--primary", "/rma/" + job.id));
+        } else if (job.status === "intake") {
+          box.appendChild(actionLink(C.t("jobs.rma_intake"), "btn--primary", "/rma/" + job.id));
+        } else if (job.status === "repair") {
+          box.appendChild(actionLink(C.t("jobs.rma_repair"), "btn--primary", "/rma/" + job.id));
+        } else if (job.status === "outgoing") {
+          // The return is packed on the Packen page like a delivery.
+          box.appendChild(actionButton(C.t("jobs.rma_pack"), "btn--primary", function () { startPacking(job); }));
         } else if (job.status === "checked") {
           box.appendChild(actionButton(C.t("jobs.ship"), "btn--primary", function () { shipJob(job); }));
         }
@@ -163,7 +193,7 @@
         var card = el("div", "card");
         card.setAttribute("data-job-id", String(job.id));
         var body = el("div", "card__body");
-        body.appendChild(el("div", "card__id", job.order_ref));
+        body.appendChild(el("div", "card__id", job.kind === "rma" ? C.fmt(C.t("rma.head"), { ref: job.order_ref }) : job.order_ref));
         if (job.customer) body.appendChild(el("div", "card__name", job.customer));
         var meta = [job.template_name];
         if (job.unit_count > 1) meta.push(C.fmt(C.t("jobs.carton"), { n: job.unit_no, total: job.unit_count }));
@@ -214,12 +244,14 @@
           reportError(err);
           return;
         }
-        clearNode(newTemplate);
-        templates.forEach(function (tpl) {
-          var option = document.createElement("option");
-          option.value = String(tpl.id);
-          option.textContent = tpl.name;
-          newTemplate.appendChild(option);
+        [newTemplate, rmaTemplate].forEach(function (select) {
+          clearNode(select);
+          templates.forEach(function (tpl) {
+            var option = document.createElement("option");
+            option.value = String(tpl.id);
+            option.textContent = tpl.name;
+            select.appendChild(option);
+          });
         });
         templatesLoaded = templates.length > 0;
         if (!templates.length) C.toast(C.t("jobs.no_templates"));
@@ -227,6 +259,7 @@
 
       newJobBtn.addEventListener("click", async function () {
         newJobForm.hidden = !newJobForm.hidden;
+        rmaForm.hidden = true;
         if (!newJobForm.hidden) {
           await loadTemplates();
           newOrder.focus();
@@ -234,6 +267,17 @@
       });
       document.getElementById("new-job-cancel").addEventListener("click", function () {
         newJobForm.hidden = true;
+      });
+      rmaBtn.addEventListener("click", async function () {
+        rmaForm.hidden = !rmaForm.hidden;
+        newJobForm.hidden = true;
+        if (!rmaForm.hidden) {
+          await loadTemplates();
+          rmaNo.focus();
+        }
+      });
+      document.getElementById("rma-cancel").addEventListener("click", function () {
+        rmaForm.hidden = true;
       });
       filterAll.addEventListener("click", function () { setFilter(false); });
       filterMine.addEventListener("click", function () { setFilter(true); });
@@ -261,6 +305,32 @@
           reportError(err);
         }
         newSubmit.disabled = false;
+      });
+
+      // "RMA annehmen": the number comes from the other system; a duplicate is answered with 409.
+      rmaForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var templateId = parseInt(rmaTemplate.value, 10);
+        var rmaNumber = rmaNo.value.trim();
+        if (!templateId) {
+          C.toast(C.t("jobs.template_required"));
+          return;
+        }
+        if (!rmaNumber) {
+          C.toast(C.t("jobs.rma_required"));
+          return;
+        }
+        rmaSubmit.disabled = true;
+        try {
+          var job = await C.api("/api/rma", {
+            body: { template_id: templateId, rma_no: rmaNumber, customer: rmaCustomer.value.trim() },
+          });
+          window.location.href = "/rma/" + job.id;
+          return;
+        } catch (err) {
+          reportError(err);
+        }
+        rmaSubmit.disabled = false;
       });
 
       async function init() {

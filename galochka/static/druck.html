@@ -160,7 +160,12 @@
         labelText.appendChild(order);
         if (data.customer) labelLine(data.customer, true);
         if (data.template_name) labelLine(data.template_name, false);
-        if (!rma) {
+        if (rma) {
+          // RMA label: number, customer, set name, QR; the check is only added when somebody did one.
+          if ((data.status === "checked" || data.status === "shipped") && data.checked_by) {
+            labelLine(C.fmt(C.t("label.checked"), { name: data.checked_by, date: formatDate(data.checked_at) }), false);
+          }
+        } else {
           if (data.unit_count > 1) {
             labelLine(C.fmt(C.t("label.carton"), { n: data.unit_no, total: data.unit_count }), true);
           }

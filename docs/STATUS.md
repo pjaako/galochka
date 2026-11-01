@@ -57,5 +57,11 @@ Updated: 2026-11-01
   expert cancels), outgoing stage reusing confirm/finish/check/ship, expert reopen rules,
   `GET /api/expert/rma/open` with the in/kept/out/delta balance. Suite: 631 passed, 2 skipped.
 
+- T7b (2026-11-01, Sonnet, reviewed): RMA UI. Line-by-line component extracted to
+  `static/lines.js` (shared by Packen and RMA intake), RMA page (intake, repair notes with
+  Ersetzt / Einbehalten / Hinzugefügt, client-side return preview, Rücksendung vorbereiten),
+  Aufträge RMA creation and cards, Packen header/notes for returns, RMA label. Browser
+  tests cover the whole RMA flow. Suite: 642 passed, 2 skipped.
+
 ## Next
-- T7b RMA UI + label.
+- T8 Reports + CSV export.
