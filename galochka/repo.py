@@ -566,3 +566,720 @@ def find_template_for_bom(conn: sqlite3.Connection, name: str, product_item_id: 
         (name, product_item_id, product_item_id, name),
     ).fetchone()
     return None if row is None else row["id"]
+
+
+# --- jobs ---------------------------------------------------------------------------------
+
+JOB_STATUSES = ("open", "packing", "packed", "checked", "shipped", "cancelled", "intake", "repair", "outgoing")
+ACTIVE_JOB_STATUSES = ("open", "packing", "intake", "repair", "outgoing", "packed")
+MAX_ORDER_REF = 40
+MAX_CUSTOMER = 80
+MAX_REASON = 200
+MIN_REASON = 3
+MAX_SERIAL = 64
+MAX_UNITS = 20
+MAX_CUSTOMISATIONS = 50
+_BUILTIN_QUALITY_POINTS = ["sauber", "unbeschädigt", "funktion"]
+
+# Statuses in which lines can be confirmed or added, per job kind. The stage of the line
+# must equal current_stage(job).
+_CONFIRMABLE = {"delivery": ("packing",), "rma": ("intake", "outgoing")}
+
+
+class LinesOpen(ValueError):
+    """finish_job found lines without a confirmation in the current attempt."""
+
+    def __init__(self, line_ids: list[int]):
+        super().__init__("lines_open")
+        self.line_ids = line_ids
+
+
+def default_quality_points(conn: sqlite3.Connection) -> list[str]:
+    """settings.default_quality_points as a list (the built-in three when missing or garbled)."""
+    try:
+        points = json.loads(get_setting(conn, "default_quality_points", "[]") or "[]")
+    except ValueError:
+        points = None
+    if not isinstance(points, list) or not all(isinstance(p, str) for p in points):
+        return list(_BUILTIN_QUALITY_POINTS)
+    return points
+
+
+def current_stage(job) -> str:
+    """Which line stage a job is working on: 'pack' (delivery), 'intake' or 'outgoing' (rma)."""
+    if job["kind"] == "delivery":
+        return "pack"
+    if job["status"] in ("outgoing", "packed", "checked", "shipped"):
+        return "outgoing"
+    return "intake"
+
+
+# Same rule as current_stage, for SQL (alias j = jobs).
+_STAGE_SQL = (
+    "(CASE WHEN j.kind = 'delivery' THEN 'pack'"
+    " WHEN j.status IN ('outgoing','packed','checked','shipped') THEN 'outgoing' ELSE 'intake' END)"
+)
+_ATTEMPT_SQL = "(1 + (SELECT COUNT(*) FROM checks k WHERE k.job_id = j.id AND k.result = 'rejected'))"
+# Intake lines are done once confirmed, whatever the attempt: attempts count rejected
+# second checks, which only concern the packed/outgoing box.
+_DONE_SQL = (
+    "EXISTS (SELECT 1 FROM confirmations c WHERE c.job_line_id = l.id"
+    f" AND (l.stage = 'intake' OR c.attempt = {_ATTEMPT_SQL}))"
+)
+_JOB_SELECT = f"""
+    SELECT j.*, w.name AS claimed_by_name, {_STAGE_SQL} AS stage, {_ATTEMPT_SQL} AS attempt,
+           (SELECT COUNT(*) FROM job_lines l
+             WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL} AND l.withheld = 0) AS lines_total,
+           (SELECT COUNT(*) FROM job_lines l
+             WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL} AND l.withheld = 0 AND {_DONE_SQL}) AS lines_done
+    FROM jobs j LEFT JOIN workers w ON w.id = j.claimed_by
+"""
+
+
+def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    """The job with claimed_by_name, stage, attempt, lines_total and lines_done, or None."""
+    return conn.execute(_JOB_SELECT + " WHERE j.id = ?", (job_id,)).fetchone()
+
+
+def list_jobs(
+    conn: sqlite3.Connection, statuses, kind: str | None = None, claimed_by: int | None = None
+) -> list[sqlite3.Row]:
+    """Jobs in the given statuses (oldest first), optionally of one kind / claimed by one worker."""
+    statuses = list(statuses)
+    where = [f"j.status IN ({','.join('?' * len(statuses))})"]
+    args: list = list(statuses)
+    if kind is not None:
+        where.append("j.kind = ?")
+        args.append(kind)
+    if claimed_by is not None:
+        where.append("j.claimed_by = ?")
+        args.append(claimed_by)
+    return conn.execute(_JOB_SELECT + " WHERE " + " AND ".join(where) + " ORDER BY j.id", args).fetchall()
+
+
+def job_to_dict(row) -> dict:
+    """JSON shape of a job (row from get_job / list_jobs)."""
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "stage": row["stage"],
+        "order_ref": row["order_ref"],
+        "customer": row["customer"],
+        "template_id": row["template_id"],
+        "template_name": row["template_name"],
+        "unit_no": row["unit_no"],
+        "unit_count": row["unit_count"],
+        "ad_hoc": bool(row["ad_hoc"]),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "claimed_by": row["claimed_by"],
+        "claimed_by_name": row["claimed_by_name"],
+        "claimed_at": row["claimed_at"],
+        "stage_changed_at": row["stage_changed_at"],
+        "note": row["note"],
+        "lines_total": row["lines_total"],
+        "lines_done": row["lines_done"],
+    }
+
+
+def _clean_reason(value) -> str:
+    reason = value.strip() if isinstance(value, str) else ""
+    if len(reason) < MIN_REASON:
+        raise ValueError("reason_required")
+    if len(reason) > MAX_REASON:
+        raise ValueError("invalid_request")
+    return reason
+
+
+def _clean_extra(conn: sqlite3.Connection, raw: dict) -> dict:
+    """Validate an extra line ({item_id?, label, qty, reason}); returns clean values with the label resolved."""
+    item_id = raw.get("item_id")
+    item_id = item_id.strip() if isinstance(item_id, str) else item_id
+    item_id = item_id or None
+    if item_id is not None and (not isinstance(item_id, str) or len(item_id) > 80):
+        raise ValueError("invalid_request")
+    label = raw.get("label")
+    label = "" if label is None else label
+    if not isinstance(label, str) or len(label.strip()) > MAX_NAME:
+        raise ValueError("invalid_request")
+    label = label.strip()
+    qty = raw.get("qty", 1)
+    if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= MAX_QTY:
+        raise ValueError("bad_qty")
+    reason = _clean_reason(raw.get("reason"))
+    if item_id is not None:
+        names = item_names(conn, [item_id])
+        if item_id not in names:
+            raise ValueError(f"unknown_item:{item_id}")
+        label = label or names[item_id].strip()[:MAX_NAME]
+    if not label:
+        raise ValueError("label_required")
+    return {"item_id": item_id, "label": label, "qty": qty, "reason": reason}
+
+
+def _clean_customisations(conn: sqlite3.Connection, template: dict, customisations) -> tuple[dict, list[dict]]:
+    """Split office customisations into ({template_line_id: reason} to withhold, [extra lines])."""
+    if customisations is None:
+        customisations = []
+    if not isinstance(customisations, list) or len(customisations) > MAX_CUSTOMISATIONS:
+        raise ValueError("invalid_request")
+    line_ids = {line["id"] for line in template["lines"]}
+    withheld: dict[int, str] = {}
+    extras: list[dict] = []
+    for raw in customisations:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid_request")
+        if raw.get("template_line_id") is not None:
+            line_id = raw["template_line_id"]
+            if isinstance(line_id, bool) or not isinstance(line_id, int) or line_id not in line_ids:
+                raise ValueError("unknown_template_line")
+            if raw.get("withheld") is not True:
+                raise ValueError("invalid_request")
+            withheld.setdefault(line_id, _clean_reason(raw.get("reason")))
+        else:
+            extras.append(_clean_extra(conn, raw))
+    return withheld, extras
+
+
+def _insert_line(conn: sqlite3.Connection, job_id: int, stage: str, position: int, line: dict) -> int:
+    cur = conn.execute(
+        "INSERT INTO job_lines (job_id, template_line_id, stage, position, item_id, label, instruction, qty,"
+        " photo_required, serial_required, quality_points, photo_item_id, source, withheld, withheld_reason,"
+        " withheld_by, reason)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            job_id, line.get("template_line_id"), stage, position, line.get("item_id"), line["label"],
+            line.get("instruction", ""), line["qty"], 1 if line.get("photo_required", True) else 0,
+            1 if line.get("serial_required") else 0, json.dumps(line["quality_points"], ensure_ascii=False),
+            line.get("photo_item_id"), line.get("source", "template"), 1 if line.get("withheld") else 0,
+            line.get("withheld_reason", ""), line.get("withheld_by", ""), line.get("reason", ""),
+        ),
+    )
+    return cur.lastrowid
+
+
+def create_jobs(
+    conn: sqlite3.Connection,
+    kind: str,
+    template_id: int,
+    order_ref: str,
+    customer: str,
+    count: int,
+    customisations: list[dict] | None,
+    created_by: str,
+    now: str,
+    ad_hoc: bool = False,
+    claimed_by: int | None = None,
+    note: str = "",
+    commit: bool = True,
+) -> list[int]:
+    """Create `count` jobs (one per box) from a template; returns their ids, unit_no 1..count.
+
+    Each job gets its own snapshot of the template lines (stage 'pack' for delivery,
+    'intake' for rma), so later template edits never touch it. Empty quality_points
+    resolve to settings.default_quality_points, an empty label to the item name.
+    Customisations (office): {template_line_id, withheld: true, reason} marks that snapshot
+    line withheld; {item_id?, label, qty, reason} appends a line with source 'office'.
+    Status: delivery 'open' ('packing' and claimed when ad_hoc with a worker), rma 'intake'.
+
+    Raises KeyError (unknown template) or ValueError with a code: template_inactive,
+    template_empty, bad_count, reason_required, unknown_template_line, unknown_item:<id>,
+    label_required, bad_qty, invalid_request, rma_duplicate. Validation happens before the first write.
+    """
+    if kind not in ("delivery", "rma"):
+        raise ValueError("invalid_request")
+    order_ref = (order_ref or "").strip()
+    customer = (customer or "").strip()
+    if not 1 <= len(order_ref) <= MAX_ORDER_REF or len(customer) > MAX_CUSTOMER:
+        raise ValueError("invalid_request")
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_UNITS or (
+        kind == "rma" and count != 1
+    ):
+        raise ValueError("bad_count")
+    template = get_template(conn, template_id)
+    if template is None:
+        raise KeyError(template_id)
+    if not template["active"]:
+        raise ValueError("template_inactive")
+    if not template["lines"]:
+        raise ValueError("template_empty")
+    withheld, extras = _clean_customisations(conn, template, customisations)
+    default_points = default_quality_points(conn)
+
+    stage = "pack" if kind == "delivery" else "intake"
+    claimed = ad_hoc and claimed_by is not None and kind == "delivery"
+    status = ("packing" if claimed else "open") if kind == "delivery" else "intake"
+    snapshot = []
+    for line in template["lines"]:
+        item = dict(line)
+        item["template_line_id"] = line["id"]
+        item["label"] = line["label"].strip() or line["item_name"].strip() or line["item_id"] or ""
+        item["quality_points"] = line["quality_points"] or list(default_points)
+        if line["id"] in withheld:
+            item.update(withheld=True, withheld_reason=withheld[line["id"]], withheld_by=created_by)
+        snapshot.append(item)
+    for extra in extras:
+        snapshot.append(
+            {
+                **extra,
+                "source": "office",
+                "photo_required": True,
+                "serial_required": False,
+                "quality_points": list(default_points),
+                "photo_item_id": extra["item_id"],
+            }
+        )
+
+    ids = []
+    for unit_no in range(1, count + 1):
+        try:
+            cur = conn.execute(
+                "INSERT INTO jobs (kind, template_id, template_name, order_ref, customer, unit_no, unit_count,"
+                " ad_hoc, status, created_by, created_at, claimed_by, claimed_at, stage_changed_at, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kind, template_id, template["name"], order_ref, customer, unit_no, count,
+                    1 if ad_hoc else 0, status, created_by, now,
+                    claimed_by if claimed else None, now if claimed else "", now, (note or "").strip(),
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            if kind == "rma" and "order_ref" in str(e):
+                raise ValueError("rma_duplicate") from e
+            raise
+        job_id = cur.lastrowid
+        for position, line in enumerate(snapshot, start=1):
+            _insert_line(conn, job_id, stage, position, line)
+        ids.append(job_id)
+    if commit:
+        conn.commit()
+    return ids
+
+
+# --- job lines and confirmations -----------------------------------------------------------
+
+
+def get_line(conn: sqlite3.Connection, line_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM job_lines WHERE id = ?", (line_id,)).fetchone()
+
+
+def _load_json(value, default):
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return default
+    return data if isinstance(data, type(default)) else default
+
+
+def _photo_url(path: str) -> str | None:
+    return f"/photos/{path}" if path else None
+
+
+_LINE_LATEST_SELECT = """
+    SELECT l.*, c.id AS c_id, c.worker_id AS c_worker_id, w.name AS c_worker_name, c.attempt AS c_attempt,
+           c.result AS c_result, c.qty AS c_qty, c.serials AS c_serials, c.quality AS c_quality,
+           c.reason AS c_reason, c.photo_path AS c_photo_path, c.created_at AS c_created_at
+    FROM job_lines l
+    LEFT JOIN confirmations c ON c.id = (SELECT MAX(id) FROM confirmations WHERE job_line_id = l.id)
+    LEFT JOIN workers w ON w.id = c.worker_id
+"""
+
+
+def _latest_of(row) -> dict | None:
+    if row["c_id"] is None:
+        return None
+    return {
+        "id": row["c_id"],
+        "line_id": row["id"],
+        "worker_id": row["c_worker_id"],
+        "worker_name": row["c_worker_name"],
+        "attempt": row["c_attempt"],
+        "result": row["c_result"],
+        "qty": row["c_qty"],
+        "serials": _load_json(row["c_serials"], []),
+        "quality": _load_json(row["c_quality"], {}),
+        "reason": row["c_reason"],
+        "photo_url": _photo_url(row["c_photo_path"]),
+        "created_at": row["c_created_at"],
+    }
+
+
+def get_job_lines(conn: sqlite3.Connection, job_id: int, stage: str | None = None) -> list[tuple]:
+    """[(line row, latest confirmation dict or None)] in position order, for one stage (None = all)."""
+    where, args = "l.job_id = ?", [job_id]
+    if stage is not None:
+        where += " AND l.stage = ?"
+        args.append(stage)
+    rows = conn.execute(f"{_LINE_LATEST_SELECT} WHERE {where} ORDER BY l.stage, l.position", args).fetchall()
+    return [(row, _latest_of(row)) for row in rows]
+
+
+def get_line_with_latest(conn: sqlite3.Connection, line_id: int) -> tuple | None:
+    row = conn.execute(_LINE_LATEST_SELECT + " WHERE l.id = ?", (line_id,)).fetchone()
+    return None if row is None else (row, _latest_of(row))
+
+
+def line_to_dict(row, latest: dict | None = None) -> dict:
+    """JSON shape of a job line (without the reference photos, which the API adds)."""
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "stage": row["stage"],
+        "position": row["position"],
+        "item_id": row["item_id"],
+        "photo_item_id": row["photo_item_id"],
+        "label": row["label"],
+        "instruction": row["instruction"],
+        "qty": row["qty"],
+        "photo_required": bool(row["photo_required"]),
+        "serial_required": bool(row["serial_required"]),
+        "quality_points": _load_json(row["quality_points"], []),
+        "source": row["source"],
+        "withheld": bool(row["withheld"]),
+        "withheld_reason": row["withheld_reason"],
+        "withheld_by": row["withheld_by"],
+        "reason": row["reason"],
+        "source_line_id": row["source_line_id"],
+        "latest": latest,
+    }
+
+
+def get_confirmation(conn: sqlite3.Connection, confirmation_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT c.*, w.name AS worker_name FROM confirmations c JOIN workers w ON w.id = c.worker_id"
+        " WHERE c.id = ?",
+        (confirmation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "line_id": row["job_line_id"],
+        "worker_id": row["worker_id"],
+        "worker_name": row["worker_name"],
+        "attempt": row["attempt"],
+        "result": row["result"],
+        "qty": row["qty"],
+        "serials": _load_json(row["serials"], []),
+        "quality": _load_json(row["quality"], {}),
+        "reason": row["reason"],
+        "photo_url": _photo_url(row["photo_path"]),
+        "created_at": row["created_at"],
+    }
+
+
+def current_attempt(conn: sqlite3.Connection, job_id: int) -> int:
+    """1 + the number of rejected second checks of the job."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM checks WHERE job_id = ? AND result = 'rejected'", (job_id,)
+    ).fetchone()
+    return 1 + row["n"]
+
+
+def open_line_ids(conn: sqlite3.Connection, job_id: int, stage: str, attempt: int) -> list[int]:
+    """Ids (in position order) of the non-withheld lines of `stage` without a confirmation in `attempt`.
+
+    Intake lines ignore the attempt: any confirmation counts.
+    """
+    rows = conn.execute(
+        "SELECT l.id FROM job_lines l WHERE l.job_id = ? AND l.stage = ? AND l.withheld = 0"
+        " AND NOT EXISTS (SELECT 1 FROM confirmations c WHERE c.job_line_id = l.id"
+        "                 AND (l.stage = 'intake' OR c.attempt = ?))"
+        " ORDER BY l.position",
+        (job_id, stage, attempt),
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def lines_blocker(job, stage: str) -> str | None:
+    """'wrong_status' unless lines of `stage` can be confirmed or added in the job's current status."""
+    if job["status"] not in _CONFIRMABLE[job["kind"]] or stage != current_stage(job):
+        return "wrong_status"
+    return None
+
+
+def validate_confirmation(line, result, qty, serials, quality, reason, has_photo) -> str | None:
+    """The server rules for one confirmation. Pure; returns None when fine, else the error key.
+
+    `line` is a job_lines row (or dict with the same keys). Keys returned: error.line_withheld,
+    error.bad_qty, error.reason_required, error.photo_required, error.serial_count,
+    error.quality_not_ok, error.quality_incomplete, error.invalid_request.
+
+    Quality points: when qty > 0 (ok, not_ok, partial missing) every point of the line must be
+    answered 'ok' or 'not_ok'; a missing line with qty 0 needs no answers.
+    """
+    if line["withheld"]:
+        return "error.line_withheld"
+    if result not in ("ok", "missing", "not_ok"):
+        return "error.invalid_request"
+    if isinstance(qty, bool) or not isinstance(qty, int) or not 0 <= qty <= line["qty"]:
+        return "error.bad_qty"
+    reason = reason.strip() if isinstance(reason, str) else None
+    if reason is None or len(reason) > MAX_REASON:
+        return "error.invalid_request"
+    # ok <=> everything is there; a shortfall is 'missing' (with a reason); not_ok needs all pieces too.
+    if qty < line["qty"]:
+        if result != "missing":
+            return "error.bad_qty"
+        if len(reason) < MIN_REASON:
+            return "error.reason_required"
+    elif result == "missing":
+        return "error.bad_qty"
+    if result == "not_ok" and len(reason) < MIN_REASON:
+        return "error.reason_required"
+
+    if not isinstance(serials, list) or not all(isinstance(s, str) for s in serials):
+        return "error.invalid_request"
+    if any(not s.strip() or len(s) > MAX_SERIAL for s in serials):
+        return "error.serial_count"
+    if len(serials) > qty or (line["serial_required"] and len(serials) != qty):
+        return "error.serial_count"
+
+    if not isinstance(quality, dict):
+        return "error.invalid_request"
+    points = _load_json(line["quality_points"], [])
+    if any(k not in points or v not in ("ok", "not_ok") for k, v in quality.items()):
+        return "error.invalid_request"
+    if result == "ok" and "not_ok" in quality.values():
+        return "error.quality_not_ok"
+    if qty > 0 and any(p not in quality for p in points):
+        return "error.quality_incomplete"
+
+    needs_photo = bool(line["photo_required"]) or line["source"] == "worker" or result == "not_ok"
+    if needs_photo and not (result == "missing" and qty == 0) and not has_photo:
+        return "error.photo_required"
+    return None
+
+
+def add_confirmation(
+    conn: sqlite3.Connection,
+    line_id: int,
+    worker_id: int,
+    attempt: int,
+    result: str,
+    qty: int,
+    serials: list[str],
+    quality: dict,
+    reason: str,
+    photo_path: str,
+    now: str,
+    commit: bool = True,
+) -> int:
+    """Append a confirmation of a line (the previous one stays; the highest id is the current one).
+
+    Re-checks the job status and the server rules (validate_confirmation, has_photo = photo_path
+    is set). Raises KeyError (unknown line) or ValueError with a code: wrong_status or the key of
+    validate_confirmation without its 'error.' prefix.
+    """
+    line = get_line(conn, line_id)
+    if line is None:
+        raise KeyError(line_id)
+    job = get_job(conn, line["job_id"])
+    if lines_blocker(job, line["stage"]):
+        raise ValueError("wrong_status")
+    error = validate_confirmation(line, result, qty, serials, quality, reason, bool(photo_path))
+    if error:
+        raise ValueError(error.removeprefix("error."))
+    cur = conn.execute(
+        "INSERT INTO confirmations (job_line_id, worker_id, attempt, result, qty, serials, quality, reason,"
+        " photo_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            line_id, worker_id, attempt, result, qty,
+            json.dumps([s.strip() for s in serials], ensure_ascii=False),
+            json.dumps(quality, ensure_ascii=False), reason.strip(), photo_path or "", now,
+        ),
+    )
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def add_worker_line(
+    conn: sqlite3.Connection,
+    job_id: int,
+    stage: str,
+    item_id: str | None,
+    label: str,
+    qty: int,
+    reason: str,
+    now: str,
+    commit: bool = True,
+) -> int:
+    """A part the worker found that the list does not know (source 'worker', photo required).
+
+    Appended after the last position of the stage. Only while the job is being packed
+    (delivery packing, rma intake or outgoing) and for the job's current stage. Raises KeyError
+    (unknown job) or ValueError: wrong_status, reason_required, bad_qty, label_required,
+    unknown_item:<id>, invalid_request.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if lines_blocker(job, stage):
+        raise ValueError("wrong_status")
+    extra = _clean_extra(conn, {"item_id": item_id, "label": label, "qty": qty, "reason": reason})
+    position = conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 AS p FROM job_lines WHERE job_id = ? AND stage = ?",
+        (job_id, stage),
+    ).fetchone()["p"]
+    line_id = _insert_line(
+        conn,
+        job_id,
+        stage,
+        position,
+        {
+            **extra,
+            "source": "worker",
+            "photo_required": True,
+            "serial_required": False,
+            "quality_points": default_quality_points(conn),
+            "photo_item_id": extra["item_id"],
+        },
+    )
+    if commit:
+        conn.commit()
+    return line_id
+
+
+def delete_worker_line(conn: sqlite3.Connection, line_id: int, commit: bool = True) -> sqlite3.Row:
+    """Remove a mistakenly added worker line (source 'worker', never confirmed, job still being packed).
+
+    Returns the deleted line row (for the audit). Raises KeyError (unknown line) or
+    ValueError('wrong_status') when the line is not worker-added, already has a confirmation,
+    or the job is not in a confirmable status for the line's stage.
+    """
+    line = get_line(conn, line_id)
+    if line is None:
+        raise KeyError(line_id)
+    job = get_job(conn, line["job_id"])
+    if line["source"] != "worker" or lines_blocker(job, line["stage"]):
+        raise ValueError("wrong_status")
+    if conn.execute("SELECT 1 FROM confirmations WHERE job_line_id = ? LIMIT 1", (line_id,)).fetchone():
+        raise ValueError("wrong_status")
+    conn.execute("DELETE FROM job_lines WHERE id = ?", (line_id,))
+    if commit:
+        conn.commit()
+    return line
+
+
+# --- job workflow --------------------------------------------------------------------------
+
+
+def claim_job(conn: sqlite3.Connection, job_id: int, worker_id: int, now: str, commit: bool = True) -> int | None:
+    """The worker takes the job (open -> packing; a colleague's claim is overwritten).
+
+    Returns the previous claimed_by (worker id or None) for the audit row. Raises KeyError or
+    ValueError('wrong_status') unless the job is a delivery in open or packing.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["kind"] != "delivery" or job["status"] not in ("open", "packing"):
+        raise ValueError("wrong_status")
+    conn.execute(
+        "UPDATE jobs SET claimed_by = ?, claimed_at = ?, status = 'packing',"
+        " stage_changed_at = CASE WHEN status = 'packing' THEN stage_changed_at ELSE ? END WHERE id = ?",
+        (worker_id, now, now, job_id),
+    )
+    if commit:
+        conn.commit()
+    return job["claimed_by"]
+
+
+def second_check_applies(conn: sqlite3.Connection, job) -> bool:
+    """Does a finished box need a second check? template.second_check, else the global default.
+
+    For an rma this is only asked about the outgoing box (intake has no check).
+    """
+    row = conn.execute("SELECT second_check FROM templates WHERE id = ?", (job["template_id"],)).fetchone()
+    if row is not None and row["second_check"] is not None:
+        return bool(row["second_check"])
+    return get_setting(conn, "second_check_default", "1") == "1"
+
+
+def finish_job(conn: sqlite3.Connection, job_id: int, now: str, commit: bool = True) -> str:
+    """The worker is done: delivery packing -> packed (second check) or checked; rma intake -> repair,
+    rma outgoing -> packed or checked. Returns the new status.
+
+    Raises KeyError, ValueError('wrong_status') or LinesOpen (carries the open line ids).
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] == "intake" and job["kind"] == "rma":
+        new_status = "repair"
+    elif job["status"] == "packing" or (job["status"] == "outgoing" and job["kind"] == "rma"):
+        new_status = "packed" if second_check_applies(conn, job) else "checked"
+    else:
+        raise ValueError("wrong_status")
+    open_ids = open_line_ids(conn, job_id, current_stage(job), current_attempt(conn, job_id))
+    if open_ids:
+        raise LinesOpen(open_ids)
+    conn.execute("UPDATE jobs SET status = ?, stage_changed_at = ? WHERE id = ?", (new_status, now, job_id))
+    if commit:
+        conn.commit()
+    return new_status
+
+
+def ship_job(conn: sqlite3.Connection, job_id: int, now: str, commit: bool = True) -> None:
+    """checked -> shipped. KeyError, or ValueError('wrong_status') from any other status."""
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] != "checked":
+        raise ValueError("wrong_status")
+    conn.execute("UPDATE jobs SET status = 'shipped', stage_changed_at = ? WHERE id = ?", (now, job_id))
+    if commit:
+        conn.commit()
+
+
+def has_outgoing_confirmation(conn: sqlite3.Connection, job_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM confirmations c JOIN job_lines l ON l.id = c.job_line_id"
+        " WHERE l.job_id = ? AND l.stage = 'outgoing' LIMIT 1",
+        (job_id,),
+    ).fetchone() is not None
+
+
+def set_job_status(
+    conn: sqlite3.Connection, job_id: int, status: str, note: str, now: str, commit: bool = True
+) -> str:
+    """Expert override of the status. Returns the old status.
+
+    Allowed: packed|checked|shipped -> packing (delivery) / outgoing (rma), cancelled -> open
+    (delivery) / intake (rma), any status except shipped and cancelled -> cancelled, rma outgoing ->
+    repair when no outgoing line was confirmed yet. A non-empty note is appended to the job note.
+    Raises KeyError, ValueError('outgoing_confirmed') or ValueError('bad_transition').
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    old, kind = job["status"], job["kind"]
+    done = ("packed", "checked", "shipped")
+    if status == "cancelled":
+        allowed = old not in ("shipped", "cancelled")
+    elif status == "packing":
+        allowed = kind == "delivery" and old in done
+    elif status == "outgoing":
+        allowed = kind == "rma" and old in done
+    elif status == "open":
+        allowed = kind == "delivery" and old == "cancelled"
+    elif status == "intake":
+        allowed = kind == "rma" and old == "cancelled"
+    elif status == "repair":
+        allowed = kind == "rma" and old == "outgoing"
+        if allowed and has_outgoing_confirmation(conn, job_id):
+            raise ValueError("outgoing_confirmed")
+    else:
+        allowed = False
+    if not allowed:
+        raise ValueError("bad_transition")
+    note = (note or "").strip()
+    new_note = (job["note"] + "\n" + note).strip() if note else job["note"]
+    conn.execute(
+        "UPDATE jobs SET status = ?, stage_changed_at = ?, note = ? WHERE id = ?", (status, now, new_note, job_id)
+    )
+    if commit:
+        conn.commit()
+    return old

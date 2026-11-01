@@ -30,5 +30,13 @@ Updated: 2026-11-01
   unknown items kept as label-only lines, new/replace modes); Vorlagen tab editor and
   BOM import UI. Suite: 296 passed, 2 skipped.
 
+- T5a (2026-11-01, Sonnet, reviewed + one rework round): jobs backend. Expert job
+  creation with count and customisations (withheld / office extra), ad hoc jobs, claim,
+  worker extra lines (+ delete while unconfirmed), confirmations with all server rules
+  (qty, reason, photo, serials, all quality points answered), finish (second check
+  decided per template/global), ship, expert status PATCH, audit rows. Evidence photos
+  normalised and written outside the lock. Migration 003 (job_lines.photo_item_id).
+  Suite: 495 passed, 2 skipped.
+
 ## Next
-- T5a Jobs backend.
+- T5b Packen + Aufträge UI.

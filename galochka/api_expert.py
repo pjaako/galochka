@@ -1,12 +1,12 @@
 import json
 import math
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from galochka import importer, qr, repo
-from galochka.api import _now, _read_upload, t
+from galochka.api import _now, _read_upload, db_write, t
 from galochka.audit import audit
 from galochka.auth import require_expert
 from galochka.cassandra_client import CassandraUnavailable
@@ -531,3 +531,62 @@ def import_bom(
         })
         result["template_id"] = template_id
         return result
+
+
+# --- jobs -----------------------------------------------------------------------------------
+
+
+class JobCustomisation(BaseModel):
+    """Office customisation: withhold a template line, or add an extra line (see repo.create_jobs)."""
+
+    template_line_id: int | None = None
+    withheld: bool | None = None
+    item_id: str | None = Field(default=None, max_length=80)
+    label: str | None = Field(default=None, max_length=repo.MAX_NAME)
+    qty: int | None = Field(default=None, ge=1, le=repo.MAX_QTY)
+    reason: str = Field(default="", max_length=repo.MAX_REASON)
+
+
+class ExpertJobCreate(BaseModel):
+    kind: Literal["delivery", "rma"] = "delivery"
+    template_id: int
+    order_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
+    customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
+    count: int = Field(default=1, ge=1, le=repo.MAX_UNITS)
+    customisations: list[JobCustomisation] = Field(default_factory=list, max_length=repo.MAX_CUSTOMISATIONS)
+    note: str = Field(default="", max_length=500)
+
+
+class JobStatusUpdate(BaseModel):
+    status: Literal[repo.JOB_STATUSES]
+    note: str = Field(default="", max_length=500)
+
+
+@router.post("/jobs", status_code=201)
+def create_jobs(body: ExpertJobCreate, request: Request):
+    conn = request.app.state.conn
+    now = _now()
+    customisations = [c.model_dump(exclude_none=True) for c in body.customisations]
+    with request.app.state.lock:
+        with db_write(conn):
+            ids = repo.create_jobs(
+                conn, body.kind, body.template_id, body.order_ref, body.customer, body.count, customisations,
+                "expert", now, note=body.note, commit=False,
+            )
+            for job_id in ids:
+                audit(conn, now, "expert", "job.create", "job", job_id,
+                      {"kind": body.kind, "template_id": body.template_id, "order_ref": body.order_ref,
+                       "unit_count": body.count, "customisations": customisations})
+        return [repo.job_to_dict(repo.get_job(conn, job_id)) for job_id in ids]
+
+
+@router.patch("/jobs/{job_id}")
+def update_job_status(job_id: int, body: JobStatusUpdate, request: Request):
+    conn = request.app.state.conn
+    now = _now()
+    with request.app.state.lock:
+        with db_write(conn):
+            old = repo.set_job_status(conn, job_id, body.status, body.note, now, commit=False)
+            audit(conn, now, "expert", "job.status", "job", job_id,
+                  {"from": old, "to": body.status, "note": body.note})
+        return repo.job_to_dict(repo.get_job(conn, job_id))

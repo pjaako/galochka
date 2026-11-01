@@ -1,16 +1,17 @@
 import json
 import logging
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
-from galochka import db, qr, repo
+from galochka import db, images, qr, repo
 from galochka.audit import audit
 from galochka.cassandra_client import CassandraClient
 from galochka.config import Settings
@@ -41,6 +42,73 @@ def _read_upload(upload: UploadFile) -> bytes:
     data = upload.file.read(_MAX_UPLOAD_BYTES + 1)
     if len(data) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=t("error.too_large"))
+    return data
+
+
+# --- jobs: error mapping and request models (shared with api_expert) ------------------------
+
+# ValueError codes from repo that are state conflicts (409); every other code is a 400.
+_CONFLICT_CODES = {"wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate"}
+
+
+def job_error(e: ValueError) -> HTTPException:
+    """Map a repo ValueError code to HTTP: 'error.<code>' from strings.de.json, 409 for conflicts, else 400."""
+    code = str(e)
+    if code.startswith("unknown_item:"):
+        return HTTPException(status_code=400, detail=f"{t('error.unknown_item')} {code.split(':', 1)[1]}")
+    key = f"error.{code}"
+    if key not in _strings:
+        return HTTPException(status_code=400, detail=t("error.invalid_request"))
+    return HTTPException(status_code=409 if code in _CONFLICT_CODES else 400, detail=_strings[key])
+
+
+@contextmanager
+def db_write(conn):
+    """Wrap a write under the lock: roll back on any error; KeyError -> 404, ValueError -> job_error.
+
+    repo.LinesOpen passes through (after the rollback) so the route can answer with the line ids.
+    """
+    try:
+        yield
+    except repo.LinesOpen:
+        conn.rollback()
+        raise
+    except KeyError:
+        conn.rollback()
+        raise HTTPException(status_code=404, detail=t("error.not_found"))
+    except ValueError as e:
+        conn.rollback()
+        raise job_error(e)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=repo.MAX_REASON)]
+
+
+class JobCreateRequest(BaseModel):
+    """Ad hoc job started by a worker."""
+
+    template_id: int
+    order_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
+    customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
+
+
+class LineCreateRequest(BaseModel):
+    item_id: str | None = Field(default=None, max_length=80)
+    label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_NAME)]
+    qty: int = Field(ge=1, le=repo.MAX_QTY)
+    reason: Reason
+
+
+def _parse_json(raw: str, kind: type):
+    try:
+        data = json.loads(raw or ("[]" if kind is list else "{}"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+    if not isinstance(data, kind):
+        raise HTTPException(status_code=400, detail=t("error.invalid_request"))
     return data
 
 
@@ -79,7 +147,7 @@ def _auto_sync_loop(app: FastAPI, stop: threading.Event, first_delay: float, int
 def create_app(settings: Settings) -> FastAPI:
     # Imported here to avoid a circular import: api_expert -> auth -> api.
     from galochka.api_expert import router as expert_router
-    from galochka.auth import SESSION_COOKIE, require_worker, require_worker_or_expert
+    from galochka.auth import SESSION_COOKIE, actor_of, require_worker, require_worker_or_expert
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.photos_dir.mkdir(parents=True, exist_ok=True)
@@ -251,6 +319,190 @@ def create_app(settings: Settings) -> FastAPI:
             }
             for r in rows
         ]
+
+    # --- jobs -------------------------------------------------------------------------------
+
+    def _job_dict(job_id: int) -> dict:
+        """The job as JSON (call under the lock)."""
+        return repo.job_to_dict(repo.get_job(conn, job_id))
+
+    @app.get("/api/jobs")
+    def list_jobs(
+        worker=Depends(require_worker),
+        status: str | None = Query(None),
+        kind: str | None = Query(None),
+        mine: int = Query(0),
+    ):
+        statuses = [x.strip() for x in status.split(",") if x.strip()] if status else list(repo.ACTIVE_JOB_STATUSES)
+        if not statuses or any(x not in repo.JOB_STATUSES for x in statuses) or kind not in (None, "delivery", "rma"):
+            raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+        with lock:
+            rows = repo.list_jobs(conn, statuses, kind, worker["id"] if mine else None)
+        return [repo.job_to_dict(r) for r in rows]
+
+    @app.post("/api/jobs", status_code=201)
+    def create_adhoc_job(body: JobCreateRequest, worker=Depends(require_worker)):
+        now = _now()
+        actor = f"worker:{worker['id']}"
+        with lock:
+            with db_write(conn):
+                (job_id,) = repo.create_jobs(
+                    conn, "delivery", body.template_id, body.order_ref, body.customer, 1, [], actor, now,
+                    ad_hoc=True, claimed_by=worker["id"], commit=False,
+                )
+                audit(conn, now, actor, "job.create", "job", job_id,
+                      {"kind": "delivery", "template_id": body.template_id, "order_ref": body.order_ref,
+                       "ad_hoc": True})
+            return _job_dict(job_id)
+
+    @app.get("/api/jobs/{job_id}", dependencies=[Depends(require_worker_or_expert)])
+    def job_detail(job_id: int):
+        now = _now()
+        with lock:
+            job = repo.get_job(conn, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=t("error.not_found"))
+            lines = repo.get_job_lines(conn, job_id, repo.current_stage(job))
+            data = repo.job_to_dict(job)
+            data["second_check"] = repo.second_check_applies(conn, job)
+            data["attempt"] = job["attempt"]
+            data["open_line_ids"] = repo.open_line_ids(conn, job_id, job["stage"], job["attempt"])
+        # Cassandra calls (prefetch with a 2 s budget, then cache reads) happen outside the lock.
+        photo_ids = {row["photo_item_id"] or row["item_id"] for row, _ in lines} - {None}
+        client = app.state.cassandra
+        client.prefetch(conn, lock, sorted(photo_ids), now, budget_seconds=2.0)
+        references = {i: client.reference_photos(conn, lock, i, now) for i in photo_ids}
+        data["lines"] = []
+        for row, latest in lines:
+            line = repo.line_to_dict(row, latest)
+            ref = references.get(row["photo_item_id"] or row["item_id"])
+            line["reference"] = (
+                {"photos": ref["photos"], "stale": ref["stale"]} if ref else {"photos": [], "stale": False}
+            )
+            data["lines"].append(line)
+        data["repair_notes"] = []  # filled by the RMA task
+        data["checks"] = []  # filled by the second-check task
+        return data
+
+    @app.post("/api/jobs/{job_id}/claim")
+    def claim_job(job_id: int, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                previous = repo.claim_job(conn, job_id, worker["id"], now, commit=False)
+                audit(conn, now, f"worker:{worker['id']}", "job.claim", "job", job_id,
+                      {"previous_claimed_by": previous})
+            return _job_dict(job_id)
+
+    @app.post("/api/jobs/{job_id}/lines", status_code=201)
+    def add_job_line(job_id: int, body: LineCreateRequest, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                job = repo.get_job(conn, job_id)
+                if job is None:
+                    raise KeyError(job_id)
+                line_id = repo.add_worker_line(
+                    conn, job_id, repo.current_stage(job), body.item_id, body.label, body.qty, body.reason, now,
+                    commit=False,
+                )
+                audit(conn, now, f"worker:{worker['id']}", "line.add", "job", job_id,
+                      {"line_id": line_id, "item_id": body.item_id, "label": body.label, "qty": body.qty,
+                       "reason": body.reason})
+            row, latest = repo.get_line_with_latest(conn, line_id)
+            line = repo.line_to_dict(row, latest)
+        line["reference"] = {"photos": [], "stale": False}
+        return line
+
+    @app.delete("/api/lines/{line_id}", status_code=204)
+    def delete_job_line(line_id: int, worker=Depends(require_worker)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                line = repo.delete_worker_line(conn, line_id, commit=False)
+                audit(conn, now, f"worker:{worker['id']}", "line.delete", "job", line["job_id"],
+                      {"line_id": line_id, "label": line["label"]})
+        return Response(status_code=204)
+
+    @app.post("/api/lines/{line_id}/confirm", status_code=201)
+    def confirm_line(
+        line_id: int,
+        result: str = Form(...),
+        qty: int = Form(...),
+        reason: str = Form(""),
+        serials: str = Form("[]"),
+        quality: str = Form("{}"),
+        image: UploadFile | None = File(None),
+        worker=Depends(require_worker),
+    ):
+        serial_list = [x.strip() if isinstance(x, str) else x for x in _parse_json(serials, list)]
+        quality_map = _parse_json(quality, dict)
+        reason = reason.strip()
+        # 1. Cheap checks first, under the lock, so a bad request never costs an image decode.
+        with lock:
+            line = repo.get_line(conn, line_id)
+            if line is None:
+                raise HTTPException(status_code=404, detail=t("error.not_found"))
+            job_id = line["job_id"]
+            if repo.lines_blocker(repo.get_job(conn, job_id), line["stage"]):
+                raise HTTPException(status_code=409, detail=t("error.wrong_status"))
+            error = repo.validate_confirmation(line, result, qty, serial_list, quality_map, reason, image is not None)
+        if error:
+            raise job_error(ValueError(error.removeprefix("error.")))
+        # 2. Decode, normalise and write the photo outside the lock.
+        photo_path = ""
+        if image is not None:
+            try:
+                data = images.normalize(_read_upload(image))
+            except images.BadImage:
+                raise HTTPException(status_code=400, detail=t("error.bad_image"))
+            photo_path = images.save_photo(settings.photos_dir, f"jobs/{job_id}", data)
+        # 3. Re-check and INSERT under the lock; a failed insert removes the file again.
+        now = _now()
+        try:
+            with lock:
+                with db_write(conn):
+                    attempt = repo.current_attempt(conn, job_id)
+                    confirmation_id = repo.add_confirmation(
+                        conn, line_id, worker["id"], attempt, result, qty, serial_list, quality_map, reason,
+                        photo_path, now, commit=False,
+                    )
+                    audit(conn, now, f"worker:{worker['id']}", "line.confirm", "job", job_id,
+                          {"line_id": line_id, "confirmation_id": confirmation_id, "result": result, "qty": qty,
+                           "attempt": attempt, "photo": bool(photo_path)})
+                confirmation = repo.get_confirmation(conn, confirmation_id)
+                row, latest = repo.get_line_with_latest(conn, line_id)
+                line_json = repo.line_to_dict(row, latest)
+        except Exception:
+            if photo_path:
+                (settings.photos_dir / photo_path).unlink(missing_ok=True)
+            raise
+        return {"confirmation": confirmation, "line": line_json}
+
+    @app.post("/api/jobs/{job_id}/finish")
+    def finish_job(job_id: int, worker=Depends(require_worker)):
+        now = _now()
+        try:
+            with lock:
+                with db_write(conn):
+                    before = repo.get_job(conn, job_id)
+                    new_status = repo.finish_job(conn, job_id, now, commit=False)
+                    audit(conn, now, f"worker:{worker['id']}", "job.finish", "job", job_id,
+                          {"from": before["status"], "to": new_status})
+                return _job_dict(job_id)
+        except repo.LinesOpen as e:
+            return JSONResponse(
+                status_code=409, content={"detail": t("error.lines_open"), "open_line_ids": e.line_ids}
+            )
+
+    @app.post("/api/jobs/{job_id}/ship")
+    def ship_job(job_id: int, worker=Depends(require_worker_or_expert)):
+        now = _now()
+        with lock:
+            with db_write(conn):
+                repo.ship_job(conn, job_id, now, commit=False)
+                audit(conn, now, actor_of(worker), "job.ship", "job", job_id, {})
+            return _job_dict(job_id)
 
     @app.get("/health")
     def health():
