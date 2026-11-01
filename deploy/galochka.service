@@ -10,6 +10,7 @@ Group=galochka
 EnvironmentFile=/etc/galochka.env
 WorkingDirectory=/opt/galochka
 ExecStart=/opt/galochka/.venv/bin/galochka serve --host 0.0.0.0
+UMask=0027
 Restart=on-failure
 RestartSec=5
 

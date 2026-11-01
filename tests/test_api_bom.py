@@ -181,7 +181,7 @@ def test_bad_files_are_400(client):
     assert _post(client, content=_bom_csv()).status_code == 400  # header only
     no_qty = b'"Part No.","Part description"\r\n"A","x"\r\n'
     resp = _post(client, content=no_qty)
-    assert resp.status_code == 400 and "CSV" in resp.json()["detail"]
+    assert resp.status_code == 400 and "Quantity" in resp.json()["detail"]  # the specific BOM message
     assert _post(client, content="Part No.,Quantity\nÄ,1\n".encode("latin-1")).status_code == 400
 
 

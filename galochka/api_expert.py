@@ -2,14 +2,15 @@ import csv
 import io
 import json
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from galochka import importer, qr, repo
-from galochka.api import _now, _read_upload, db_write, t
+from galochka.api import MAX_ID, BodyId, PathId, _now, _read_upload, _strings, db_write, t
 from galochka.audit import audit
 from galochka.auth import require_expert
 from galochka.cassandra_client import CassandraUnavailable
@@ -84,10 +85,10 @@ def run_items_sync(app: FastAPI, actor: str) -> dict:
     The HTTP part runs outside the lock, the DB part inside. Raises CassandraUnavailable
     (also when no URL is configured). Used by the expert button and the daily thread.
     """
-    catalog = importer.fetch_catalog(app.state.cassandra)
+    catalog, complete = importer.fetch_catalog(app.state.cassandra)
     now = _now()
     with app.state.lock:
-        result = importer.apply_catalog(app.state.conn, catalog, now)
+        result = importer.apply_catalog(app.state.conn, catalog, now, complete)
         audit(app.state.conn, now, actor, "items.sync", "items", "", result)
     return result
 
@@ -110,9 +111,12 @@ def sync_items(request: Request):
     if not request.app.state.settings.cassandra_url:
         raise HTTPException(status_code=409, detail=t("error.cassandra_not_configured"))
     try:
-        return run_items_sync(request.app, "expert")
+        result = run_items_sync(request.app, "expert")
     except CassandraUnavailable:
         raise HTTPException(status_code=502, detail=t("error.cassandra_unreachable"))
+    if result.get("truncated"):
+        result = dict(result, warning=t("expert.sync_truncated"))
+    return result
 
 
 @router.post("/import/items")
@@ -188,7 +192,7 @@ def create_worker(body: WorkerCreate, request: Request):
 
 
 @router.patch("/workers/{worker_id}")
-def update_worker(worker_id: int, body: WorkerUpdate, request: Request):
+def update_worker(worker_id: PathId, body: WorkerUpdate, request: Request):
     conn = request.app.state.conn
     changes = body.model_dump(exclude_none=True)
     with request.app.state.lock:
@@ -208,7 +212,7 @@ def update_worker(worker_id: int, body: WorkerUpdate, request: Request):
 
 
 @router.post("/workers/{worker_id}/badge", status_code=201)
-def reissue_badge(worker_id: int, request: Request):
+def reissue_badge(worker_id: PathId, request: Request):
     """Issue a new badge: the old one is revoked (and the worker logged out) in the same step."""
     conn = request.app.state.conn
     now = _now()
@@ -227,7 +231,7 @@ def reissue_badge(worker_id: int, request: Request):
 
 
 @router.delete("/workers/{worker_id}/badge", status_code=204)
-def revoke_badge(worker_id: int, request: Request):
+def revoke_badge(worker_id: PathId, request: Request):
     conn = request.app.state.conn
     now = _now()
     with request.app.state.lock:
@@ -243,7 +247,7 @@ def revoke_badge(worker_id: int, request: Request):
 
 
 @router.get("/workers/{worker_id}/badge.svg")
-def badge_svg(worker_id: int, request: Request):
+def badge_svg(worker_id: PathId, request: Request):
     with request.app.state.lock:
         badge = repo.get_active_badge(request.app.state.conn, worker_id)
     if badge is None or not badge["token"]:
@@ -258,7 +262,7 @@ def badge_svg(worker_id: int, request: Request):
 class TemplateLineIn(BaseModel):
     """One template line. The limits live in repo.clean_line (shared with the repo layer)."""
 
-    id: int | None = None
+    id: BodyId | None = None
     item_id: str | None = None
     label: str = ""
     instruction: str = ""
@@ -331,7 +335,7 @@ def create_template(body: TemplateCreate, request: Request):
 
 
 @router.get("/templates/{template_id}")
-def get_template(template_id: int, request: Request):
+def get_template(template_id: PathId, request: Request):
     with request.app.state.lock:
         template = repo.get_template(request.app.state.conn, template_id)
     if template is None:
@@ -340,7 +344,7 @@ def get_template(template_id: int, request: Request):
 
 
 @router.put("/templates/{template_id}")
-def put_template(template_id: int, body: TemplateUpdate, request: Request):
+def put_template(template_id: PathId, body: TemplateUpdate, request: Request):
     conn = request.app.state.conn
     now = _now()
     with request.app.state.lock:
@@ -365,7 +369,7 @@ def put_template(template_id: int, body: TemplateUpdate, request: Request):
 
 
 @router.delete("/templates/{template_id}", status_code=204)
-def delete_template(template_id: int, request: Request):
+def delete_template(template_id: PathId, request: Request):
     conn = request.app.state.conn
     with request.app.state.lock:
         template = repo.get_template(conn, template_id)
@@ -384,7 +388,7 @@ def delete_template(template_id: int, request: Request):
 
 
 @router.post("/templates/{template_id}/duplicate", status_code=201)
-def duplicate_template(template_id: int, request: Request):
+def duplicate_template(template_id: PathId, request: Request):
     conn = request.app.state.conn
     now = _now()
     with request.app.state.lock:
@@ -437,8 +441,9 @@ def import_bom(
     data = _read_upload(file)
     try:
         bom = importer.parse_bom(data)  # pure CPU work, outside the lock
-    except importer.ImportError_:
-        raise HTTPException(status_code=400, detail=t("error.bad_csv"))
+    except importer.ImportError_ as e:
+        # parse_bom raises the key of a specific German message (error.bom_*) where it knows one.
+        raise HTTPException(status_code=400, detail=t(str(e)) if str(e) in _strings else t("error.bad_csv"))
     # Dry run is the default; the form field wins over the ?dry_run= query parameter of the spec.
     # Only an explicit "0"/"false" writes anything.
     dry = not _is_false(dry_run if dry_run is not None else dry_run_query if dry_run_query is not None else "1")
@@ -542,7 +547,7 @@ def import_bom(
 class JobCustomisation(BaseModel):
     """Office customisation: withhold a template line, or add an extra line (see repo.create_jobs)."""
 
-    template_line_id: int | None = None
+    template_line_id: BodyId | None = None
     withheld: bool | None = None
     item_id: str | None = Field(default=None, max_length=80)
     label: str | None = Field(default=None, max_length=repo.MAX_NAME)
@@ -552,7 +557,7 @@ class JobCustomisation(BaseModel):
 
 class ExpertJobCreate(BaseModel):
     kind: Literal["delivery", "rma"] = "delivery"
-    template_id: int
+    template_id: BodyId
     order_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
     customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
     count: int = Field(default=1, ge=1, le=repo.MAX_UNITS)
@@ -596,11 +601,30 @@ def _parse_date(value: str | None) -> date | None:
         raise HTTPException(status_code=400, detail=t("error.invalid_request")) from None
 
 
-def _created_window(date_from: date | None, date_to: date | None) -> tuple[str | None, str | None]:
-    """ISO bounds [from, before) for inclusive dates; timestamps are UTC like the stored ones."""
-    start = date_from.isoformat() if date_from else None
-    before = (date_to + timedelta(days=1)).isoformat() if date_to else None
+def _utc_midnight(day: date, zone: ZoneInfo) -> str:
+    """The start of a local calendar day as a UTC ISO string, comparable with the stored timestamps."""
+    local = datetime.combine(day, time.min, tzinfo=zone)
+    return local.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _created_window(
+    date_from: date | None, date_to: date | None, zone: ZoneInfo
+) -> tuple[str | None, str | None]:
+    """UTC ISO bounds [from, before) for inclusive local dates (a local day runs 00:00 to 24:00 in `zone`)."""
+    start = _utc_midnight(date_from, zone) if date_from else None
+    before = _utc_midnight(date_to + timedelta(days=1), zone) if date_to else None
     return start, before
+
+
+def _local_time(created_at: str, zone: ZoneInfo) -> str:
+    """A stored UTC timestamp as local 'dd.mm.yyyy HH:MM' (the input unchanged when unparsable)."""
+    try:
+        moment = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return created_at or ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(zone).strftime("%d.%m.%Y %H:%M")
 
 
 @router.get("/jobs")
@@ -610,7 +634,7 @@ def list_jobs(
     kind: str | None = Query(None),
     q: str | None = Query(None, max_length=200),
     serial: str | None = Query(None, max_length=200),
-    worker_id: int | None = Query(None, ge=1),
+    worker_id: int | None = Query(None, ge=1, le=MAX_ID),
     date_from: str | None = Query(None, alias="from"),
     date_to: str | None = Query(None, alias="to"),
     limit: int = Query(100, ge=1, le=500),
@@ -619,12 +643,14 @@ def list_jobs(
     """Jobs for the Aufträge tab and the reports, newest first.
 
     Comma-separated `status` (default: everything not shipped/cancelled), `kind`, `q` (order number,
-    customer or set name), `serial`, `worker_id`, `from`/`to` (ISO dates, inclusive, on created_at).
+    customer or set name), `serial`, `worker_id`, `from`/`to` (ISO dates, inclusive, local days in GALOCHKA_TZ, on created_at).
     """
     statuses = [x.strip() for x in status.split(",") if x.strip()] if status else list(_LISTED_JOB_STATUSES)
     if not statuses or any(x not in repo.JOB_STATUSES for x in statuses) or kind not in (None, "delivery", "rma"):
         raise HTTPException(status_code=400, detail=t("error.invalid_request"))
-    created_from, created_before = _created_window(_parse_date(date_from), _parse_date(date_to))
+    created_from, created_before = _created_window(
+        _parse_date(date_from), _parse_date(date_to), request.app.state.settings.zone
+    )
     with request.app.state.lock:
         rows = repo.search_jobs(
             request.app.state.conn, statuses, kind, q=q, serial=serial, worker_id=worker_id,
@@ -634,7 +660,7 @@ def list_jobs(
 
 
 @router.get("/jobs/{job_id}/history")
-def job_history(job_id: int, request: Request):
+def job_history(job_id: PathId, request: Request):
     """All confirmations (superseded ones too), checks, repair notes and audit rows of one job."""
     with request.app.state.lock:
         data = repo.job_history(request.app.state.conn, job_id)
@@ -644,7 +670,7 @@ def job_history(job_id: int, request: Request):
 
 
 @router.patch("/jobs/{job_id}")
-def update_job_status(job_id: int, body: JobStatusUpdate, request: Request):
+def update_job_status(job_id: PathId, body: JobStatusUpdate, request: Request):
     conn = request.app.state.conn
     now = _now()
     with request.app.state.lock:
@@ -673,7 +699,7 @@ def _csv_text(value) -> str:
     return text
 
 
-def _export_row(e: dict) -> list:
+def _export_row(e: dict, zone: ZoneInfo) -> list:
     kind = e["event"]
     quality = ", ".join(
         f"{point}={t('export.quality_ok') if answer == 'ok' else t('export.quality_not_ok')}"
@@ -690,7 +716,7 @@ def _export_row(e: dict) -> list:
         "event": t("export.event_" + kind),
         "worker": e["worker_name"],
         "attempt": e["attempt"] if kind != "note" else "",
-        "time": e["created_at"],
+        "time": _local_time(e["created_at"], zone),
         "stage": "", "position": "", "item": "", "label": "", "target_qty": "", "result": "", "qty": "",
         "serials": "", "quality": "", "reason": "", "photo": "",
     }
@@ -741,23 +767,24 @@ def export_csv(
 ):
     """The audit trail as a CSV for German Excel: one row per confirmation, second check and repair note.
 
-    UTF-8 with BOM, `;` separator, CRLF. `from`/`to` are inclusive ISO dates on the event time (UTC);
-    the default is the last 90 days up to today.
+    UTF-8 with BOM, `;` separator, CRLF. `from`/`to` are inclusive ISO dates on the event time, as local
+    days in GALOCHKA_TZ; the Zeitpunkt column is local time too. The default is the last 90 days up to today.
     """
+    zone = request.app.state.settings.zone
     if kind not in (None, "delivery", "rma"):
         raise HTTPException(status_code=400, detail=t("error.invalid_request"))
-    end = _parse_date(date_to) or datetime.now(timezone.utc).date()
+    end = _parse_date(date_to) or datetime.now(zone).date()
     start = _parse_date(date_from) or end - timedelta(days=_EXPORT_DEFAULT_DAYS)
     if start > end:
         raise HTTPException(status_code=400, detail=t("error.invalid_request"))
-    created_from, created_before = _created_window(start, end)
+    created_from, created_before = _created_window(start, end, zone)
     with request.app.state.lock:
         events = repo.export_events(request.app.state.conn, created_from, created_before, kind)
     buf = io.StringIO()
     writer = csv.writer(buf, dialect="excel", delimiter=";", lineterminator="\r\n")
     writer.writerow([t("export.col_" + name) for name in _EXPORT_COLUMNS])
     for event in events:
-        writer.writerow(_export_row(event))
+        writer.writerow(_export_row(event, zone))
     filename = f"galochka-export-{start.isoformat()}-{end.isoformat()}.csv"
     return Response(
         content=("\ufeff" + buf.getvalue()).encode("utf-8"),

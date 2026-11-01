@@ -1,15 +1,26 @@
 import io
 import re
+import warnings
 
 import qrcode
 import zxingcpp
 from PIL import Image, ImageOps, UnidentifiedImageError
 from qrcode.image.svg import SvgPathImage
 
+from galochka.images import check_size
+
+# Same limits as images.py: an oversized image is refused, not decoded.
+Image.MAX_IMAGE_PIXELS = 50_000_000
+warnings.simplefilter("error", Image.DecompressionBombWarning)
+
 # Payload of a worker badge: "galochka:badge:" + 32 url-safe characters.
 BADGE_RE = re.compile(r"^galochka:badge:([A-Za-z0-9_-]{32})$")
 
 _MAX_SIDE = 2048
+_DECODE_ERRORS = (
+    UnidentifiedImageError, OSError, ValueError, SyntaxError,
+    Image.DecompressionBombError, Image.DecompressionBombWarning,
+)
 
 
 def _read(image: Image.Image) -> str | None:
@@ -28,13 +39,14 @@ def decode_qr(data: bytes, full_res_retry: bool = True) -> str | None:
     """
     try:
         image = Image.open(io.BytesIO(data))
+        check_size(image)
         if image.format == "JPEG":
             # DCT-domain downscale: much cheaper than a full decode.
             image.draft("RGB", (_MAX_SIDE, _MAX_SIDE))
         image.load()
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError):
+    except _DECODE_ERRORS:
         return None
 
     image.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.Resampling.BILINEAR)
@@ -49,9 +61,10 @@ def decode_qr(data: bytes, full_res_retry: bool = True) -> str | None:
     # without draft so we really get the original pixels.
     try:
         original = Image.open(io.BytesIO(data))
+        check_size(original)
         original.load()
         original = ImageOps.exif_transpose(original).convert("RGB")
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError):
+    except _DECODE_ERRORS:
         return None
     if original.size == image.size:
         return None

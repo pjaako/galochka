@@ -641,11 +641,11 @@ def _job_select(extra: str = "") -> str:
 
 
 _JOB_SELECT = _job_select()
-# Report columns: when it shipped, how many lines of the current stage deviate (latest result not ok, or a
+# Report columns: when it shipped, how many non-withheld lines of any stage deviate (latest result not ok, or a
 # line a worker added), and who approved the second check (only while checked or shipped, like the label).
 _REPORT_SELECT = _job_select(f""", CASE WHEN j.status = 'shipped' THEN j.stage_changed_at END AS shipped_at,
            (SELECT COUNT(*) FROM job_lines l
-             WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL}
+             WHERE l.job_id = j.id AND l.withheld = 0
                AND (l.source = 'worker' OR COALESCE((SELECT c.result FROM confirmations c
                     WHERE c.job_line_id = l.id ORDER BY c.id DESC LIMIT 1), 'ok') <> 'ok')) AS deviations,
            CASE WHEN j.status IN ('checked', 'shipped') THEN
@@ -857,15 +857,15 @@ def _insert_line(conn: sqlite3.Connection, job_id: int, stage: str, position: in
     cur = conn.execute(
         "INSERT INTO job_lines (job_id, template_line_id, stage, position, item_id, label, instruction, qty,"
         " photo_required, serial_required, quality_points, photo_item_id, source, withheld, withheld_reason,"
-        " withheld_by, reason, source_line_id)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " withheld_by, reason, source_line_id, generated)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id, line.get("template_line_id"), stage, position, line.get("item_id"), line["label"],
             line.get("instruction", ""), line["qty"], 1 if line.get("photo_required", True) else 0,
             1 if line.get("serial_required") else 0, json.dumps(line["quality_points"], ensure_ascii=False),
             line.get("photo_item_id"), line.get("source", "template"), 1 if line.get("withheld") else 0,
             line.get("withheld_reason", ""), line.get("withheld_by", ""), line.get("reason", ""),
-            line.get("source_line_id"),
+            line.get("source_line_id"), 1 if line.get("generated") else 0,
         ),
     )
     return cur.lastrowid
@@ -1055,6 +1055,7 @@ def line_to_dict(row, latest: dict | None = None) -> dict:
         "withheld_by": row["withheld_by"],
         "reason": row["reason"],
         "source_line_id": row["source_line_id"],
+        "generated": bool(row["generated"]),
         "latest": latest,
     }
 
@@ -1116,11 +1117,18 @@ def lines_blocker(job, stage: str) -> str | None:
     return None
 
 
+def line_has_notes(conn: sqlite3.Connection, line) -> bool:
+    """True for an intake line that already has repair notes: confirming it again would break the balance."""
+    return line["stage"] == "intake" and conn.execute(
+        "SELECT 1 FROM repair_notes WHERE job_line_id = ? LIMIT 1", (line["id"],)
+    ).fetchone() is not None
+
+
 def validate_confirmation(line, result, qty, serials, quality, reason, has_photo) -> str | None:
     """The server rules for one confirmation. Pure; returns None when fine, else the error key.
 
     `line` is a job_lines row (or dict with the same keys). Keys returned: error.line_withheld,
-    error.bad_qty, error.reason_required, error.photo_required, error.serial_count,
+    error.bad_qty, error.reason_required, error.photo_required, error.serial_count, error.serial_duplicate,
     error.quality_not_ok, error.quality_incomplete, error.invalid_request.
 
     Quality points: when qty > 0 (ok, not_ok, partial missing) every point of the line must be
@@ -1152,6 +1160,8 @@ def validate_confirmation(line, result, qty, serials, quality, reason, has_photo
         return "error.serial_count"
     if len(serials) > qty or (line["serial_required"] and len(serials) != qty):
         return "error.serial_count"
+    if len({s.strip() for s in serials}) != len(serials):
+        return "error.serial_duplicate"
 
     if not isinstance(quality, dict):
         return "error.invalid_request"
@@ -1195,6 +1205,8 @@ def add_confirmation(
     job = get_job(conn, line["job_id"])
     if lines_blocker(job, line["stage"]):
         raise ValueError("wrong_status")
+    if line_has_notes(conn, line):
+        raise ValueError("line_has_notes")
     error = validate_confirmation(line, result, qty, serials, quality, reason, bool(photo_path))
     if error:
         raise ValueError(error.removeprefix("error."))
@@ -1263,14 +1275,14 @@ def delete_worker_line(conn: sqlite3.Connection, line_id: int, commit: bool = Tr
     """Remove a mistakenly added worker line (source 'worker', never confirmed, job still being packed).
 
     Returns the deleted line row (for the audit). Raises KeyError (unknown line) or
-    ValueError('wrong_status') when the line is not worker-added, already has a confirmation,
-    or the job is not in a confirmable status for the line's stage.
+    ValueError('wrong_status') when the line is not worker-added, was generated by generate_outgoing,
+    already has a confirmation, or the job is not in a confirmable status for the line's stage.
     """
     line = get_line(conn, line_id)
     if line is None:
         raise KeyError(line_id)
     job = get_job(conn, line["job_id"])
-    if line["source"] != "worker" or lines_blocker(job, line["stage"]):
+    if line["source"] != "worker" or line["generated"] or lines_blocker(job, line["stage"]):
         raise ValueError("wrong_status")
     if conn.execute("SELECT 1 FROM confirmations WHERE job_line_id = ? LIMIT 1", (line_id,)).fetchone():
         raise ValueError("wrong_status")
@@ -1623,7 +1635,7 @@ def add_repair_note(
     """Record what happened to a part during repair (rma status 'repair'). Returns the note id.
 
     replaced / kept refer to an intake line of this job with a confirmed qty > 0: qty 1..confirmed;
-    kept needs a reason (customer agreement) and Σ kept qty per line must stay <= confirmed qty;
+    kept needs a reason (customer agreement) and Σ kept + Σ replaced qty per line must stay <= confirmed qty;
     replaced keeps the qty in the outgoing list (reason optional). item_id / label default to those
     of the intake line. added (a part that was not in the box, no line) needs label or item_id,
     qty 1..999 and a reason. serial is optional (<= 64 characters).
@@ -1678,15 +1690,16 @@ def add_repair_note(
             raise ValueError("bad_line")
         if not 1 <= qty <= confirmed:
             raise ValueError("bad_qty")
-        if action == "kept":
-            if len(reason) < MIN_REASON:
-                raise ValueError("reason_required")
-            kept = conn.execute(
-                "SELECT COALESCE(SUM(qty), 0) AS n FROM repair_notes WHERE job_line_id = ? AND action = 'kept'",
-                (job_line_id,),
-            ).fetchone()["n"]
-            if kept + qty > confirmed:
-                raise ValueError("bad_qty")
+        if action == "kept" and len(reason) < MIN_REASON:
+            raise ValueError("reason_required")
+        # A piece is either kept or replaced, never both: Σ kept + Σ replaced + qty <= confirmed.
+        handled = conn.execute(
+            "SELECT COALESCE(SUM(qty), 0) AS n FROM repair_notes WHERE job_line_id = ?"
+            " AND action IN ('kept', 'replaced')",
+            (job_line_id,),
+        ).fetchone()["n"]
+        if handled + qty > confirmed:
+            raise ValueError("bad_qty")
         if item_id is None:
             item_id = line["item_id"]
         label = label or (item_name or "").strip()[:MAX_NAME] or line["label"]
@@ -1782,7 +1795,10 @@ def generate_outgoing(conn: sqlite3.Connection, job_id: int, now: str, commit: b
             )
     if not out_lines:
         raise ValueError("outgoing_empty")
-    ids = [_insert_line(conn, job_id, "outgoing", position, line) for position, line in enumerate(out_lines, 1)]
+    ids = [
+        _insert_line(conn, job_id, "outgoing", position, {**line, "generated": True})
+        for position, line in enumerate(out_lines, 1)
+    ]
     conn.execute("UPDATE jobs SET status = 'outgoing', stage_changed_at = ? WHERE id = ?", (now, job_id))
     if commit:
         conn.commit()

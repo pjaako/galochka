@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints
@@ -25,6 +26,12 @@ _strings = json.loads(_STRINGS_PATH.read_text(encoding="utf-8"))
 
 def t(key: str) -> str:
     return _strings[key]
+
+
+# SQLite integers are signed 64 bit: a larger id would end in an OverflowError (500) instead of a 404/422.
+MAX_ID = 2**63 - 1
+PathId = Annotated[int, PathParam(ge=1, le=MAX_ID)]  # {job_id}, {line_id}, ... route parameters
+BodyId = Annotated[int, Field(ge=1, le=MAX_ID)]  # ids in request bodies
 
 
 def _now() -> str:
@@ -50,7 +57,7 @@ def _read_upload(upload: UploadFile) -> bytes:
 # ValueError codes from repo that are state conflicts (409); every other code is a 400.
 _CONFLICT_CODES = {
     "wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate", "outgoing_exists",
-    "outgoing_empty",
+    "outgoing_empty", "line_has_notes",
 }
 # Rule violations about who may act (403).
 _FORBIDDEN_CODES = {"same_worker", "not_author"}
@@ -96,7 +103,7 @@ Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, m
 class JobCreateRequest(BaseModel):
     """Ad hoc job started by a worker."""
 
-    template_id: int
+    template_id: BodyId
     order_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
     customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
 
@@ -104,7 +111,7 @@ class JobCreateRequest(BaseModel):
 class RmaCreateRequest(BaseModel):
     """RMA accepted by a worker; rma_no is the number from the other system."""
 
-    template_id: int
+    template_id: BodyId
     rma_no: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=repo.MAX_ORDER_REF)]
     customer: Annotated[str, StringConstraints(strip_whitespace=True, max_length=repo.MAX_CUSTOMER)] = ""
 
@@ -113,7 +120,7 @@ class RepairNoteRequest(BaseModel):
     """Loose on purpose: repo.add_repair_note owns the rules and answers with German 400 messages."""
 
     action: Literal["replaced", "kept", "added"]
-    job_line_id: int | None = None
+    job_line_id: BodyId | None = None
     item_id: str | None = Field(default=None, max_length=200)
     label: str = Field(default="", max_length=1000)
     qty: int = 1
@@ -195,7 +202,8 @@ def create_app(settings: Settings) -> FastAPI:
             ).start()
         yield
         stop.set()
-        conn.close()
+        with lock:  # a sync or request still running finishes its DB work first
+            conn.close()
 
     app = FastAPI(lifespan=lifespan)
     app.state.conn = conn
@@ -416,11 +424,11 @@ def create_app(settings: Settings) -> FastAPI:
             data["packer_ids"] = [r["id"] for r in repo.current_confirmers(conn, job)]
             data["checks"] = repo.list_checks(conn, job_id)
             data["repair_notes"] = repo.list_repair_notes(conn, job_id)
-        # Cassandra calls (prefetch with a 2 s budget, then cache reads) happen outside the lock.
+        # Cassandra calls (prefetch with a 2 s budget, then cache-only reads: never one HTTP call per line) happen outside the lock.
         photo_ids = {row["photo_item_id"] or row["item_id"] for row, _ in lines + intake} - {None}
         client = app.state.cassandra
         client.prefetch(conn, lock, sorted(photo_ids), now, budget_seconds=2.0)
-        references = {i: client.reference_photos(conn, lock, i, now) for i in photo_ids}
+        references = {i: client.reference_photos(conn, lock, i, now, fetch=False) for i in photo_ids}
 
         def dicts(pairs) -> list[dict]:
             out = []
@@ -443,14 +451,14 @@ def create_app(settings: Settings) -> FastAPI:
         return data
 
     @app.get("/api/jobs/{job_id}", dependencies=[Depends(require_worker_or_expert)])
-    def job_detail(job_id: int):
+    def job_detail(job_id: PathId):
         data = _job_detail(job_id)
         if data is None:
             raise HTTPException(status_code=404, detail=t("error.not_found"))
         return data
 
     @app.post("/api/jobs/{job_id}/claim")
-    def claim_job(job_id: int, worker=Depends(require_worker)):
+    def claim_job(job_id: PathId, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -460,7 +468,7 @@ def create_app(settings: Settings) -> FastAPI:
             return _job_dict(job_id)
 
     @app.post("/api/jobs/{job_id}/lines", status_code=201)
-    def add_job_line(job_id: int, body: LineCreateRequest, worker=Depends(require_worker)):
+    def add_job_line(job_id: PathId, body: LineCreateRequest, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -480,7 +488,7 @@ def create_app(settings: Settings) -> FastAPI:
         return line
 
     @app.delete("/api/lines/{line_id}", status_code=204)
-    def delete_job_line(line_id: int, worker=Depends(require_worker)):
+    def delete_job_line(line_id: PathId, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -491,7 +499,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/lines/{line_id}/confirm", status_code=201)
     def confirm_line(
-        line_id: int,
+        line_id: PathId,
         result: str = Form(...),
         qty: int = Form(...),
         reason: str = Form(""),
@@ -511,6 +519,8 @@ def create_app(settings: Settings) -> FastAPI:
             job_id = line["job_id"]
             if repo.lines_blocker(repo.get_job(conn, job_id), line["stage"]):
                 raise HTTPException(status_code=409, detail=t("error.wrong_status"))
+            if repo.line_has_notes(conn, line):
+                raise HTTPException(status_code=409, detail=t("error.line_has_notes"))
             error = repo.validate_confirmation(line, result, qty, serial_list, quality_map, reason, image is not None)
         if error:
             raise job_error(ValueError(error.removeprefix("error.")))
@@ -545,7 +555,7 @@ def create_app(settings: Settings) -> FastAPI:
         return {"confirmation": confirmation, "line": line_json}
 
     @app.post("/api/jobs/{job_id}/finish")
-    def finish_job(job_id: int, worker=Depends(require_worker)):
+    def finish_job(job_id: PathId, worker=Depends(require_worker)):
         now = _now()
         try:
             with lock:
@@ -562,7 +572,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/check", status_code=201)
     def check_job(
-        job_id: int,
+        job_id: PathId,
         result: str = Form(...),
         note: str = Form(""),
         image: UploadFile | None = File(None),
@@ -600,7 +610,7 @@ def create_app(settings: Settings) -> FastAPI:
         return {"check": check, "job": job_json}
 
     @app.post("/api/jobs/{job_id}/repair-notes", status_code=201)
-    def add_repair_note(job_id: int, body: RepairNoteRequest, worker=Depends(require_worker)):
+    def add_repair_note(job_id: PathId, body: RepairNoteRequest, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -615,7 +625,7 @@ def create_app(settings: Settings) -> FastAPI:
             return note
 
     @app.delete("/api/repair-notes/{note_id}", status_code=204)
-    def delete_repair_note(note_id: int, worker=Depends(require_worker)):
+    def delete_repair_note(note_id: PathId, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -625,7 +635,7 @@ def create_app(settings: Settings) -> FastAPI:
         return Response(status_code=204)
 
     @app.post("/api/jobs/{job_id}/outgoing")
-    def generate_outgoing(job_id: int, worker=Depends(require_worker)):
+    def generate_outgoing(job_id: PathId, worker=Depends(require_worker)):
         now = _now()
         with lock:
             with db_write(conn):
@@ -635,7 +645,7 @@ def create_app(settings: Settings) -> FastAPI:
         return _job_detail(job_id)
 
     @app.get("/api/jobs/{job_id}/qr.svg")
-    def job_qr(job_id: int):
+    def job_qr(job_id: PathId):
         # Unauthenticated on purpose: the job id is not a secret and the label page loads it as <img>.
         with lock:
             exists = repo.get_job(conn, job_id) is not None
@@ -644,7 +654,7 @@ def create_app(settings: Settings) -> FastAPI:
         return Response(content=qr.make_svg(f"galochka:job:{job_id}"), media_type="image/svg+xml")
 
     @app.get("/api/jobs/{job_id}/label", dependencies=[Depends(require_worker_or_expert)])
-    def job_label(job_id: int):
+    def job_label(job_id: PathId):
         with lock:
             data = repo.label_data(conn, job_id)
         if data is None:
@@ -652,7 +662,7 @@ def create_app(settings: Settings) -> FastAPI:
         return data
 
     @app.post("/api/jobs/{job_id}/ship")
-    def ship_job(job_id: int, worker=Depends(require_worker_or_expert)):
+    def ship_job(job_id: PathId, worker=Depends(require_worker_or_expert)):
         now = _now()
         with lock:
             with db_write(conn):

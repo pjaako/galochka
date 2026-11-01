@@ -69,7 +69,7 @@ galochka/
 - `templates(id, product_item_id NULL FK, name, active DEFAULT 1, second_check INTEGER NULL (NULL = global setting), created_at, updated_at)`.
 - `template_lines(id, template_id FK CASCADE, position, item_id NULL FK, label, instruction, qty DEFAULT 1, photo_required DEFAULT 1, serial_required DEFAULT 0, quality_points TEXT DEFAULT '[]' ('[]' = use setting at job creation), photo_item_id NULL)`; UNIQUE(template_id, position).
 - `jobs(id, kind CHECK IN ('delivery','rma'), template_id FK RESTRICT, template_name, order_ref, customer, unit_no DEFAULT 1, unit_count DEFAULT 1, ad_hoc DEFAULT 0, status, created_by (actor), created_at, claimed_by NULL FK workers, claimed_at, stage_changed_at, note)`.
-  - status CHECK IN ('open','packing','packed','checked','shipped','cancelled','intake','repair','outgoing').
+  - status CHECK IN ('open','packing','packed','checked','shipped','cancelled','intake','repair','outgoing'). Expert reopen keeps the lines' confirmations; the packer re-confirms what changed and a new second check follows.
   - delivery: open → packing (claim) → packed (finish) → checked (check ok) → shipped; reject: packed → packing; second check off: finish → checked. Expert PATCH: packed|checked|shipped → packing, cancelled → open, any → cancelled.
   - rma: intake → (finish) repair → (POST outgoing) outgoing → packed → checked → shipped; cancelled for nothing-to-return. Second check applies to outgoing only. Expert reopen outgoing → repair only if no outgoing confirmation exists (else 409).
   - partial unique index `order_ref WHERE kind='rma'`.
@@ -117,7 +117,7 @@ Pages: `/` (→ auftraege), `/anmelden`, `/auftraege`, `/packen/{job_id}`, `/pru
 | POST /api/lines/{id}/confirm | cookie | multipart `result,qty,reason,serials(JSON),quality(JSON),image?` → 201; 400 `error.photo_required|serial_count|reason_required`; 409 wrong status |
 | POST /api/jobs/{id}/finish | cookie | → 200 job; 409 `error.lines_open` + `{open_line_ids}` |
 | POST /api/jobs/{id}/check | cookie | multipart `result,note,image` → 201; 403 `error.same_worker`; 409 |
-| POST /api/jobs/{id}/ship | cookie/expert | from checked (or packed when check off) → 200 |
+| POST /api/jobs/{id}/ship | cookie/expert | from checked only (finish lands in checked when the second check is off) → 200 |
 | POST /api/jobs/{id}/repair-notes | cookie | `{job_line_id?,action,item_id?,label,qty,serial,reason}` → 201 |
 | DELETE /api/repair-notes/{id} | cookie (author) | → 204 |
 | POST /api/jobs/{id}/outgoing | cookie | → 200 job with outgoing lines; 409 |

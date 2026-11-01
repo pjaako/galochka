@@ -1,10 +1,13 @@
 import csv
 import io
+import logging
 import sqlite3
 from dataclasses import dataclass
 
 from galochka import repo
 from galochka.cassandra_client import CassandraClient
+
+log = logging.getLogger("galochka")
 
 REQUIRED_COLUMNS = ("Part No.", "Part description")
 
@@ -288,19 +291,25 @@ def import_items(conn: sqlite3.Connection, data: bytes, now: str) -> dict:
     }
 
 
-def fetch_catalog(client: CassandraClient) -> list[dict]:
-    """Collect every item from Cassandra. Network only: call it outside the lock.
+def fetch_catalog(client: CassandraClient) -> tuple[list[dict], bool]:
+    """Collect every item from Cassandra as (items, complete). Network only: call it outside the lock.
 
+    complete is False when Cassandra's listing may be truncated (a call returned its row limit).
     Raises CassandraUnavailable (also when the client is not configured).
     """
-    return list(client.iter_all_items())
+    collect = getattr(client, "collect_items", None)
+    if collect is not None:
+        return collect()
+    return list(client.iter_all_items()), True
 
 
-def apply_catalog(conn: sqlite3.Connection, items: list[dict], now: str) -> dict:
+def apply_catalog(conn: sqlite3.Connection, items: list[dict], now: str, complete: bool = True) -> dict:
     """Upsert a fetched catalog (source='cassandra') and deactivate items it no longer has.
 
     An empty catalog changes nothing, not even items_synced_at: an empty answer from
-    Cassandra must never wipe the local catalog. The caller holds app.state.lock.
+    Cassandra must never wipe the local catalog. An incomplete catalog (complete=False, the listing
+    was truncated) is upserted but deactivates nothing and the result carries "truncated": True.
+    The caller holds app.state.lock.
     """
     existing = {row["id"]: row for row in conn.execute("SELECT * FROM items")}
     counts = {"added": 0, "updated": 0, "same": 0}
@@ -326,20 +335,26 @@ def apply_catalog(conn: sqlite3.Connection, items: list[dict], now: str) -> dict
             )
             counts[outcome] += 1
         if seen:
-            deactivated = _deactivate_missing(conn, seen, now)
+            if complete:
+                deactivated = _deactivate_missing(conn, seen, now)
             repo.set_setting(conn, "items_synced_at", now, commit=False)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
 
-    return {
+    if not complete:
+        log.warning("item sync: Cassandra's listing is truncated (row limit hit); nothing deactivated")
+    result = {
         "added": counts["added"],
         "updated": counts["updated"],
         "deactivated": deactivated,
         "total_active": _total_active(conn),
         "synced_at": repo.get_setting(conn, "items_synced_at", "") or None,
     }
+    if not complete:
+        result["truncated"] = True
+    return result
 
 
 def sync_items(conn: sqlite3.Connection, client: CassandraClient, now: str) -> dict:
@@ -348,4 +363,5 @@ def sync_items(conn: sqlite3.Connection, client: CassandraClient, now: str) -> d
     The API layer calls the two halves separately so the HTTP part stays outside the lock.
     Raises CassandraUnavailable.
     """
-    return apply_catalog(conn, fetch_catalog(client), now)
+    items, complete = fetch_catalog(client)
+    return apply_catalog(conn, items, now, complete)

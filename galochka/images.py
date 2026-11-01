@@ -1,12 +1,24 @@
 import io
 import uuid
+import warnings
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+# Refuse oversized images instead of decoding them: Pillow only warns between 1x and 2x this limit,
+# the warning is turned into an error below.
+Image.MAX_IMAGE_PIXELS = 50_000_000
+warnings.simplefilter("error", Image.DecompressionBombWarning)
+
 
 class BadImage(ValueError):
     pass
+
+
+def check_size(image: Image.Image) -> None:
+    """Refuse an image over MAX_IMAGE_PIXELS before decoding it (independent of the warning filter)."""
+    if image.width * image.height > Image.MAX_IMAGE_PIXELS:
+        raise Image.DecompressionBombError(f"image has {image.width * image.height} pixels")
 
 
 def normalize(data: bytes, max_side: int = 1024) -> bytes:
@@ -17,12 +29,13 @@ def normalize(data: bytes, max_side: int = 1024) -> bytes:
     """
     try:
         image = Image.open(io.BytesIO(data))
+        check_size(image)
         image.load()
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        image = ImageOps.exif_transpose(image)
+        image = image.convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError,
+            Image.DecompressionBombWarning) as e:
         raise BadImage(str(e)) from e
-
-    image = ImageOps.exif_transpose(image)
-    image = image.convert("RGB")
 
     width, height = image.size
     long_side = max(width, height)

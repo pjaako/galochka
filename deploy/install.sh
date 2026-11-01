@@ -9,7 +9,7 @@ APP_DIR=/opt/galochka
 DATA_DIR=/var/lib/galochka
 
 apt-get update
-apt-get install -y python3 python3-venv python3-pip git rsync sqlite3 sudo
+apt-get install -y python3 python3-venv python3-pip git rsync sqlite3 sudo tzdata
 
 if ! id galochka >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin galochka
@@ -28,6 +28,8 @@ fi
 
 mkdir -p "$DATA_DIR"
 chown -R galochka:galochka "$DATA_DIR"
+# The database holds the badge tokens: no access for other users on the machine.
+chmod 0750 "$DATA_DIR"
 
 # The venv and the rest of /opt/galochka stay root-owned by design; the
 # galochka service only needs to read them, and only ever writes under

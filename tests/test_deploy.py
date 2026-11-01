@@ -149,3 +149,22 @@ def test_cli_wrapper_preserves_galochka_env():
     assert "/etc/galochka.env" in text
     assert "GALOCHKA_DATA" in text and "GALOCHKA_EXPERT_PASSWORD" in text
     assert "sudo -u galochka" in text
+
+
+def test_data_dir_and_files_are_not_world_readable():
+    assert 'chmod 0750 "$DATA_DIR"' in INSTALL_SH.read_text()
+    assert "UMask=0027" in SERVICE_UNIT.read_text()
+    lines = [line.strip() for line in BACKUP_SH.read_text().splitlines()]
+    assert "umask 077" in lines
+    assert lines.index("umask 077") < lines.index('mkdir -p "$TARGET"')
+
+
+@pytest.mark.skipif(shutil.which("sqlite3") is None, reason="sqlite3 not available")
+def test_backup_archive_is_private(tmp_path):
+    data_dir = tmp_path / "data"
+    out_dir = tmp_path / "out"
+    _make_data_dir(data_dir)
+    env = dict(os.environ, GALOCHKA_DATA=str(data_dir))
+    result = subprocess.run(["bash", str(BACKUP_SH), str(out_dir)], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).stat().st_mode & 0o077 == 0

@@ -294,7 +294,8 @@ def test_job_detail_uses_cassandra_outside_the_lock(client, worker_client, add_i
             lock.release()
             calls.append(("prefetch", list(ids), budget_seconds))
 
-        def reference_photos(self, conn, lock, item_id, now):
+        def reference_photos(self, conn, lock, item_id, now, fetch=True):
+            assert fetch is False, "the job detail reads the cache only"
             assert lock.acquire(blocking=False), "reference_photos takes the lock itself"
             lock.release()
             return {"item_id": item_id, "photos": [{"url": f"http://c/{item_id}.jpg"}], "stale": item_id == "P9"}

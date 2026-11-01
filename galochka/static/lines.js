@@ -610,7 +610,7 @@
       card.appendChild(serialWrap);
       card.appendChild(photoWrap);
       card.appendChild(panelWrap);
-      if (line.source === "worker" && !line.latest && editable) {
+      if (line.source === "worker" && !line.latest && !line.generated && editable) {
         var remove = button(C.t("pack.remove"), "btn--danger", function () { removeLine(line); });
         remove.style.marginTop = "16px";
         card.appendChild(remove);

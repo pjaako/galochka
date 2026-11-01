@@ -84,8 +84,12 @@ class CassandraClient:
             raise CassandraUnavailable("unexpected groups answer")
         return [str(g) for g in data]
 
-    def list_items(self, group: str) -> list[dict]:
-        """GET /api/items?group=<group>&limit=1000. An empty group means no group filter."""
+    def _fetch_items(self, group: str) -> tuple[list[dict], bool]:
+        """GET /api/items?group=<group>&limit=1000 -> (rows, truncated).
+
+        An empty group means no group filter. truncated is True when Cassandra returned exactly
+        _ITEMS_LIMIT rows: there may be more that it cannot page to.
+        """
         query = {"limit": _ITEMS_LIMIT}
         if group:
             query["group"] = group
@@ -95,7 +99,31 @@ class CassandraClient:
             raise CassandraUnavailable("items endpoint not found") from e
         if not isinstance(data, list):
             raise CassandraUnavailable("unexpected items answer")
-        return [row for row in data if isinstance(row, dict)]
+        return [row for row in data if isinstance(row, dict)], len(data) >= _ITEMS_LIMIT
+
+    def list_items(self, group: str) -> list[dict]:
+        """GET /api/items?group=<group>&limit=1000. An empty group means no group filter."""
+        return self._fetch_items(group)[0]
+
+    def _walk_items(self, flags: dict):
+        groups = self.list_groups()
+        seen: set[str] = set()
+        for group in groups:
+            rows, truncated = self._fetch_items(group)
+            flags["truncated"] = flags["truncated"] or truncated
+            for row in rows:
+                item_id = row.get("item_id")
+                if item_id and item_id not in seen:
+                    seen.add(item_id)
+                    yield row
+        known_groups = set(groups)
+        rows, truncated = self._fetch_items("")
+        flags["truncated"] = flags["truncated"] or truncated
+        for row in rows:
+            item_id = row.get("item_id")
+            if item_id and item_id not in seen and (row.get("group_name") or "") not in known_groups:
+                seen.add(item_id)
+                yield row
 
     def iter_all_items(self):
         """Yield every active item once.
@@ -103,22 +131,15 @@ class CassandraClient:
         Walks the groups (one call each), then makes one ungrouped call to pick up
         items with an empty group name. Limitation: Cassandra has no offset paging,
         so a group with more than 1000 items (or more than 1000 ungrouped items)
-        is truncated.
+        is truncated; collect_items reports that.
         """
-        groups = self.list_groups()
-        seen: set[str] = set()
-        for group in groups:
-            for row in self.list_items(group):
-                item_id = row.get("item_id")
-                if item_id and item_id not in seen:
-                    seen.add(item_id)
-                    yield row
-        known_groups = set(groups)
-        for row in self.list_items(""):
-            item_id = row.get("item_id")
-            if item_id and item_id not in seen and (row.get("group_name") or "") not in known_groups:
-                seen.add(item_id)
-                yield row
+        yield from self._walk_items({"truncated": False})
+
+    def collect_items(self) -> tuple[list[dict], bool]:
+        """Every active item as (rows, complete). complete is False when any call hit the row limit."""
+        flags = {"truncated": False}
+        rows = list(self._walk_items(flags))
+        return rows, not flags["truncated"]
 
     # --- reference photos with cache --------------------------------------
 
@@ -170,8 +191,31 @@ class CassandraClient:
         except sqlite3.Error as e:
             log.warning("cassandra_cache write failed: %s", e)
 
-    def reference_photos(self, conn, lock, item_id: str, now: str) -> dict:
+    def _cache_park(self, conn, lock, item_id: str, now: str) -> None:
+        """Write a negative entry (ok=0, old json kept) unless the cache already holds a fresh answer."""
+        try:
+            with lock:
+                row = conn.execute("SELECT * FROM cassandra_cache WHERE item_id=?", (item_id,)).fetchone()
+                if row is not None:
+                    try:
+                        age = _age_seconds(row["fetched_at"], now)
+                    except ValueError:
+                        age = float("inf")
+                    if 0 <= age < (POSITIVE_TTL_SECONDS if row["ok"] else NEGATIVE_TTL_SECONDS):
+                        return
+                conn.execute(
+                    "INSERT OR REPLACE INTO cassandra_cache (item_id, json, fetched_at, ok) VALUES (?, ?, ?, 0)",
+                    (item_id, row["json"] if row is not None else "", now),
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            log.warning("cassandra_cache park failed: %s", e)
+
+    def reference_photos(self, conn, lock, item_id: str, now: str, fetch: bool = True) -> dict:
         """Reference photos of one item, from the cache or from Cassandra. Never raises.
+
+        fetch=False never touches the network: it serves whatever the cache holds (positive,
+        negative or expired, the latter two flagged stale) and an empty answer when it holds nothing.
 
         Positive entries live 10 minutes, negative ones (ok=0, fetch failed) 60 s. A
         failed fetch keeps the old json in the negative entry, so stale data is served
@@ -181,6 +225,15 @@ class CassandraClient:
             return self._build(item_id, {}, False)
 
         row = self._cache_read(conn, lock, item_id)
+        if not fetch:
+            if row is None:
+                return self._build(item_id, {}, False)
+            try:
+                age = _age_seconds(row["fetched_at"], now)
+            except ValueError:
+                age = float("inf")
+            fresh = row["ok"] and 0 <= age < POSITIVE_TTL_SECONDS
+            return self._from_cache(item_id, row["json"], stale=not fresh)
         old_json = ""
         if row is not None:
             old_json = row["json"]
@@ -226,7 +279,12 @@ class CassandraClient:
         try:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="cassandra-prefetch")
             futures = [executor.submit(self._prefetch_one, conn, lock, i, now) for i in ids]
-            concurrent.futures.wait(futures, timeout=budget_seconds)
+            _, pending = concurrent.futures.wait(futures, timeout=budget_seconds)
+            # Over budget: park a short negative entry so the next requests are answered from the
+            # cache at once instead of waiting again. A fetch still running overwrites it when it ends.
+            for future, item_id in zip(futures, ids):
+                if future in pending:
+                    self._cache_park(conn, lock, item_id, now)
         except Exception:
             log.exception("prefetch failed")
         finally:

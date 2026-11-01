@@ -127,9 +127,10 @@ def test_search_by_worker_covers_confirmer_checker_note_creator_and_claimer(clie
 
 
 def test_search_by_created_date_is_inclusive(client):
+    # Local days in Europe/Berlin (CET, UTC+1 on these dates): 22:59:59Z is 23:59:59 on the 30th local.
     tpl = _template(client)
     ids = [_expert_jobs(client, tpl, order_ref=f"D-{i}")[0]["id"] for i in range(3)]
-    for job_id, stamp in zip(ids, ("2026-10-30T23:59:59+00:00", "2026-10-31T00:00:00+00:00", "2026-11-01T23:59:59+00:00")):
+    for job_id, stamp in zip(ids, ("2026-10-30T22:59:59+00:00", "2026-10-30T23:00:00+00:00", "2026-11-01T22:59:59+00:00")):
         _set(client, "UPDATE jobs SET created_at = ? WHERE id = ?", (stamp, job_id))
     assert _ids(client, **{"from": "2026-10-31"}) == [ids[2], ids[1]]
     assert _ids(client, to="2026-10-31") == [ids[1], ids[0]]
@@ -408,14 +409,14 @@ def test_export_date_filter_is_inclusive_and_applies_to_the_event_time(client, n
     with client.app.state.lock:
         ids = [r["id"] for r in client.app.state.conn.execute("SELECT id FROM confirmations ORDER BY id")]
     _set(client, "UPDATE confirmations SET created_at = '2026-09-01T10:00:00+00:00' WHERE id = ?", (ids[0],))
-    _set(client, "UPDATE confirmations SET created_at = '2026-10-15T23:59:59+00:00' WHERE id = ?", (ids[1],))
-    _set(client, "UPDATE checks SET created_at = '2026-10-16T00:00:00+00:00'")
+    _set(client, "UPDATE confirmations SET created_at = '2026-10-15T21:59:59+00:00' WHERE id = ?", (ids[1],))
+    _set(client, "UPDATE checks SET created_at = '2026-10-15T22:00:00+00:00'")
     everything = _rows(_export(client, **{"from": "2026-01-01", "to": "2026-12-31"}))[1:]
     assert len(everything) == 3
     only_old = _rows(_export(client, **{"from": "2026-09-01", "to": "2026-09-01"}))[1:]
-    assert [r[12] for r in only_old] == ["Bestätigung"] and only_old[0][20] == "2026-09-01T10:00:00+00:00"
+    assert [r[12] for r in only_old] == ["Bestätigung"] and only_old[0][20] == "01.09.2026 12:00"  # CEST
     middle = _rows(_export(client, **{"from": "2026-10-01", "to": "2026-10-15"}))[1:]
-    assert [r[20] for r in middle] == ["2026-10-15T23:59:59+00:00"]  # inclusive end date, check excluded
+    assert [r[20] for r in middle] == ["15.10.2026 23:59"]  # inclusive end date (local), check excluded
     assert [r[12] for r in _rows(_export(client, **{"from": "2026-10-16", "to": "2026-10-16"}))[1:]] == ["Prüfung"]
     assert len(_rows(_export(client, **{"from": "2026-09-02", "to": "2026-10-14"}))) == 1  # header only
 

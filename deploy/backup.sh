@@ -2,6 +2,8 @@
 # Backs up the galochka database and photos to a tar.gz archive in
 # <target_dir>, keeping only the 8 newest archives there.
 set -euo pipefail
+# Archives contain the database (badge tokens): readable by the owner only.
+umask 077
 
 TARGET="${1:?usage: backup.sh <target_dir>}"
 

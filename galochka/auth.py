@@ -12,7 +12,7 @@ SESSION_COOKIE = "galochka_session"
 
 def _expert_password_ok(request: Request, given: str | None) -> bool:
     expected = request.app.state.settings.expert_password
-    return given is not None and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+    return bool(given) and bool(expected) and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
 
 
 def require_expert(request: Request, x_expert_password: str | None = Header(default=None)) -> None:

@@ -220,7 +220,22 @@ def test_kept_sum_per_line_cannot_exceed_confirmed_qty(conn):
     _note(conn, job_id, wid, "kept", cable, qty=1, reason="Kunde will auch den Rest")
     with pytest.raises(ValueError, match="bad_qty"):
         _note(conn, job_id, wid, "kept", cable, qty=1, reason="Kunde will")
-    _note(conn, job_id, wid, "replaced", cable, qty=3)  # replaced is not part of the kept sum
+    with pytest.raises(ValueError, match="bad_qty"):
+        _note(conn, job_id, wid, "replaced", cable, qty=1)  # kept + replaced share the confirmed qty
+
+
+def test_kept_and_replaced_cannot_exceed_confirmed_qty_together(conn):
+    wid = _worker(conn)
+    job_id = _repair_job(conn, wid)
+    cable = _intake_ids(conn, job_id)[0]  # 3 arrived
+    _note(conn, job_id, wid, "replaced", cable, qty=2)
+    with pytest.raises(ValueError, match="bad_qty"):
+        _note(conn, job_id, wid, "kept", cable, qty=2, reason="Kunde will")
+    with pytest.raises(ValueError, match="bad_qty"):
+        _note(conn, job_id, wid, "replaced", cable, qty=2)
+    _note(conn, job_id, wid, "kept", cable, qty=1, reason="Kunde will")
+    with pytest.raises(ValueError, match="bad_qty"):
+        _note(conn, job_id, wid, "replaced", cable, qty=1)
 
 
 def test_confirmed_qty_is_the_latest_confirmation(conn):
