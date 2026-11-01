@@ -148,6 +148,14 @@
         } else if (job.status === "checked") {
           box.appendChild(actionButton(C.t("jobs.ship"), "btn--primary", function () { shipJob(job); }));
         }
+        if (job.status === "checked" || job.status === "shipped") {
+          // The box label is printed from the office PC (Dymo); the page opens in a new tab.
+          var label = actionLink(C.t("jobs.label"), "btn--secondary", "/druck/etikett/" + job.id);
+          label.target = "_blank";
+          label.rel = "noopener";
+          label.setAttribute("data-label-link", "");
+          box.appendChild(label);
+        }
         return box;
       }
 

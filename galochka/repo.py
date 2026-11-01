@@ -1234,6 +1234,147 @@ def ship_job(conn: sqlite3.Connection, job_id: int, now: str, commit: bool = Tru
         conn.commit()
 
 
+def current_confirmers(conn: sqlite3.Connection, job) -> list[sqlite3.Row]:
+    """Workers (id, name) who confirmed lines of the current stage in the current attempt, first one first."""
+    return conn.execute(
+        "SELECT w.id AS id, w.name AS name, MIN(c.id) AS first_id FROM confirmations c"
+        " JOIN job_lines l ON l.id = c.job_line_id JOIN workers w ON w.id = c.worker_id"
+        " WHERE l.job_id = ? AND l.stage = ? AND c.attempt = ? GROUP BY w.id ORDER BY first_id",
+        (job["id"], current_stage(job), job["attempt"]),
+    ).fetchall()
+
+
+def packer_names(conn: sqlite3.Connection, job) -> list[str]:
+    """Distinct names of the workers who packed the current attempt ("gepackt von")."""
+    return [r["name"] for r in current_confirmers(conn, job)]
+
+
+def check_blocker(
+    conn: sqlite3.Connection, job_id: int, worker_id: int, result: str, note: str, has_photo: bool
+) -> str | None:
+    """The rule check of a second check, no write. Returns None or an error code.
+
+    Codes: wrong_status (job not packed), same_worker (the checker packed the current attempt),
+    invalid_request (unknown result), photo_required (ok without box photo), reason_required (rejected
+    with a note under 3 characters). Raises KeyError for an unknown job.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] != "packed":
+        return "wrong_status"
+    if any(r["id"] == worker_id for r in current_confirmers(conn, job)):
+        return "same_worker"
+    if result not in ("ok", "rejected"):
+        return "invalid_request"
+    if result == "ok" and not has_photo:
+        return "photo_required"
+    if result == "rejected":
+        note = (note or "").strip()
+        if len(note) < MIN_REASON:
+            return "reason_required"
+        if len(note) > MAX_REASON:
+            return "invalid_request"
+    return None
+
+
+def add_check(
+    conn: sqlite3.Connection,
+    job_id: int,
+    worker_id: int,
+    result: str,
+    note: str,
+    photo_path: str,
+    now: str,
+    commit: bool = True,
+) -> int:
+    """Second check of a packed box (append-only row in `checks`). Returns the check id.
+
+    ok -> status checked (box photo required). rejected -> back to packing (delivery) or outgoing
+    (rma), stage_changed_at = now; the confirmations stay, current_attempt() goes up by one so all
+    non-withheld lines are open again. Raises KeyError or ValueError with a code of check_blocker.
+    """
+    error = check_blocker(conn, job_id, worker_id, result, note, bool(photo_path))
+    if error:
+        raise ValueError(error)
+    job = get_job(conn, job_id)
+    cur = conn.execute(
+        "INSERT INTO checks (job_id, worker_id, result, note, photo_path, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (job_id, worker_id, result, (note or "").strip(), photo_path or "", now),
+    )
+    if result == "ok":
+        new_status = "checked"
+    else:
+        new_status = "packing" if job["kind"] == "delivery" else "outgoing"
+    conn.execute("UPDATE jobs SET status = ?, stage_changed_at = ? WHERE id = ?", (new_status, now, job_id))
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def _check_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "worker_id": row["worker_id"],
+        "worker_name": row["worker_name"],
+        "result": row["result"],
+        "note": row["note"],
+        "photo_url": _photo_url(row["photo_path"]),
+        "created_at": row["created_at"],
+        "attempt": row["attempt"],
+    }
+
+
+_CHECK_SELECT = (
+    "SELECT k.*, w.name AS worker_name,"
+    " 1 + (SELECT COUNT(*) FROM checks r WHERE r.job_id = k.job_id AND r.result = 'rejected' AND r.id < k.id)"
+    " AS attempt FROM checks k JOIN workers w ON w.id = k.worker_id"
+)
+
+
+def get_check(conn: sqlite3.Connection, check_id: int) -> dict | None:
+    row = conn.execute(_CHECK_SELECT + " WHERE k.id = ?", (check_id,)).fetchone()
+    return None if row is None else _check_dict(row)
+
+
+def list_checks(conn: sqlite3.Connection, job_id: int) -> list[dict]:
+    """All second checks of the job, newest first. `attempt` = the packing attempt the check judged."""
+    rows = conn.execute(_CHECK_SELECT + " WHERE k.job_id = ? ORDER BY k.id DESC", (job_id,)).fetchall()
+    return [_check_dict(r) for r in rows]
+
+
+def label_data(conn: sqlite3.Connection, job_id: int) -> dict | None:
+    """What the box label prints, or None for an unknown job.
+
+    checked_by / checked_at come from the approving check and only while the job is checked or shipped
+    (an expert reopening wipes the claim); None means "ohne Prüfung" (second check off).
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        return None
+    checked_by = checked_at = None
+    if job["status"] in ("checked", "shipped"):
+        row = conn.execute(_CHECK_SELECT + " WHERE k.job_id = ? AND k.result = 'ok' ORDER BY k.id DESC LIMIT 1",
+                           (job_id,)).fetchone()
+        if row is not None:
+            checked_by, checked_at = row["worker_name"], row["created_at"]
+    return {
+        "id": job["id"],
+        "kind": job["kind"],
+        "status": job["status"],
+        "order_ref": job["order_ref"],
+        "customer": job["customer"],
+        "template_name": job["template_name"],
+        "unit_no": job["unit_no"],
+        "unit_count": job["unit_count"],
+        "packed_by": packer_names(conn, job),
+        "checked_by": checked_by,
+        "checked_at": checked_at,
+        "shipped_at": job["stage_changed_at"] if job["status"] == "shipped" else None,
+    }
+
+
 def has_outgoing_confirmation(conn: sqlite3.Connection, job_id: int) -> bool:
     return conn.execute(
         "SELECT 1 FROM confirmations c JOIN job_lines l ON l.id = c.job_line_id"

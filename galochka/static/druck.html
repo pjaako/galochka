@@ -19,12 +19,9 @@
   <main class="main">
     <h1 class="no-print" data-i18n="print.title"></h1>
 
-    <!-- Box label (T6). -->
-    <p id="label-stub" class="note no-print" data-i18n="common.not_available" hidden></p>
-
-    <!-- Badge print page: opened from the office PC with the expert password. -->
+    <!-- Login form of both branches: opened from the office PC with the expert password. -->
     <form id="login-form" class="login-form no-print" hidden>
-      <p class="field__help" data-i18n="print.password_hint"></p>
+      <p class="field__help" id="password-hint" data-i18n="print.password_hint"></p>
       <input type="password" id="password-input" class="input-id" data-i18n-placeholder="expert.password_placeholder"
         autocomplete="off">
       <button type="submit" class="btn btn--primary" data-i18n="expert.login"></button>
@@ -32,6 +29,19 @@
 
     <p id="error-note" class="note no-print" role="alert" hidden></p>
 
+    <!-- Box label: /druck/etikett/<job_id> (delivery and RMA). -->
+    <div id="label-view" hidden>
+      <p id="label-warning" class="note no-print" hidden></p>
+      <div class="print-label print-label--box" id="label-box">
+        <div class="box-label__text" id="label-text"></div>
+        <img id="label-qr" class="box-label__qr" alt="">
+      </div>
+      <div class="form-actions no-print">
+        <button type="button" id="label-print-btn" class="btn btn--primary" data-i18n="print.button"></button>
+      </div>
+    </div>
+
+    <!-- Badge: /druck/badge/<worker_id>. -->
     <div id="badge-view" hidden>
       <div class="print-label print-label--badge">
         <img id="badge-qr" class="badge-label__qr" alt="">
@@ -55,6 +65,10 @@
       var badgeView = document.getElementById("badge-view");
       var qrImg = document.getElementById("badge-qr");
       var objectUrl = null;
+      var labelView = document.getElementById("label-view");
+      var labelText = document.getElementById("label-text");
+      var labelQr = document.getElementById("label-qr");
+      var labelWarning = document.getElementById("label-warning");
 
       var parts = window.location.pathname.split("/");
       var kind = parts[2];
@@ -62,12 +76,14 @@
 
       function showError(key) {
         badgeView.hidden = true;
+        labelView.hidden = true;
         errorNote.textContent = C.t(key);
         errorNote.hidden = false;
       }
 
       function showLogin() {
         badgeView.hidden = true;
+        labelView.hidden = true;
         errorNote.hidden = true;
         loginForm.hidden = false;
       }
@@ -112,14 +128,108 @@
         badgeView.hidden = false;
       }
 
+
+      // --- box label (/druck/etikett/<job_id>) -----------------------------------------------------
+
+      function two(n) {
+        return n < 10 ? "0" + n : String(n);
+      }
+
+      // ISO timestamp -> dd.mm.yyyy in the browser's time zone.
+      function formatDate(iso) {
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return "";
+        return two(d.getDate()) + "." + two(d.getMonth() + 1) + "." + d.getFullYear();
+      }
+
+      function labelLine(text, strong) {
+        var line = document.createElement("div");
+        line.className = "box-label__line" + (strong ? " box-label__line--strong" : "");
+        line.textContent = text;
+        labelText.appendChild(line);
+        return line;
+      }
+
+      function renderLabel(data) {
+        while (labelText.firstChild) labelText.removeChild(labelText.firstChild);
+        var rma = data.kind === "rma";
+        var order = document.createElement("div");
+        order.className = "box-label__order";
+        order.id = "label-order";
+        order.textContent = rma ? C.fmt(C.t("label.rma"), { ref: data.order_ref }) : data.order_ref;
+        labelText.appendChild(order);
+        if (data.customer) labelLine(data.customer, true);
+        if (data.template_name) labelLine(data.template_name, false);
+        if (!rma) {
+          if (data.unit_count > 1) {
+            labelLine(C.fmt(C.t("label.carton"), { n: data.unit_no, total: data.unit_count }), true);
+          }
+          if (data.packed_by && data.packed_by.length) {
+            labelLine(C.fmt(C.t("label.packed"), { names: data.packed_by.join(", ") }), false);
+          }
+          // A label for a box that is not released yet (expert opens it early) states nothing about the check.
+          if (data.status === "checked" || data.status === "shipped") {
+            labelLine(
+              data.checked_by
+                ? C.fmt(C.t("label.checked"), { name: data.checked_by, date: formatDate(data.checked_at) })
+                : C.t("label.unchecked"),
+              false
+            );
+          }
+        }
+        labelWarning.hidden = data.status === "checked" || data.status === "shipped" || rma;
+        if (!labelWarning.hidden) labelWarning.textContent = C.fmt(C.t("label.not_final"), { status: C.t("status." + data.status) });
+        // Unauthenticated endpoint: no token needed for the <img>.
+        labelQr.alt = C.t("label.qr_alt");
+        labelQr.src = "/api/jobs/" + targetId + "/qr.svg";
+        labelView.hidden = false;
+      }
+
+      // Worker session first (noRedirect: a 401 is ours to handle), then the expert password.
+      async function fetchLabel() {
+        var path = "/api/jobs/" + targetId + "/label";
+        try {
+          return await C.api(path, { noRedirect: true });
+        } catch (err) {
+          if (!err || err.status !== 401) throw err;
+        }
+        if (!C.getExpertPassword()) {
+          var needLogin = { status: 401, needLogin: true };
+          throw needLogin;
+        }
+        return C.expertApi(path);
+      }
+
+      async function showLabel() {
+        errorNote.hidden = true;
+        var data;
+        try {
+          data = await fetchLabel();
+        } catch (err) {
+          if (err && err.status === 401) {
+            showLogin(); // no password stored, or expertApi cleared a wrong one and toasted
+          } else if (err && err.status === 404) {
+            showError("label.unknown_job");
+          } else {
+            C.toast((err && err.detail) || C.t("error.generic"));
+          }
+          return;
+        }
+        loginForm.hidden = true;
+        renderLabel(data);
+      }
+
       loginForm.addEventListener("submit", function (event) {
         event.preventDefault();
         C.setExpertPassword(passwordInput.value);
         passwordInput.value = "";
-        showBadge();
+        if (kind === "etikett") showLabel(); else showBadge();
       });
 
       document.getElementById("print-btn").addEventListener("click", function () {
+        window.print();
+      });
+      document.getElementById("label-print-btn").addEventListener("click", function () {
         window.print();
       });
 
@@ -136,8 +246,8 @@
             showLogin();
           }
         } else {
-          // /druck/etikett/<job_id>: the box label arrives with T6.
-          document.getElementById("label-stub").hidden = false;
+          document.getElementById("password-hint").textContent = C.t("label.password_hint");
+          await showLabel();
         }
       }
       init();

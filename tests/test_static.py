@@ -110,11 +110,11 @@ def test_worker_pages_have_nav_skeleton(client):
 
 
 def test_stub_pages_check_the_session_and_redirect_to_login(client):
-    for path in ("/pruefen/1", "/rma/1"):
+    for path in ("/rma/1",):
         html = client.get(path).text
         assert 'data-i18n="common.not_available"' in html
         assert "C.loadMe()" in html and "C.goLogin()" in html, path
-    for path in ("/auftraege", "/packen/1"):
+    for path in ("/auftraege", "/packen/1", "/pruefen/1"):
         html = client.get(path).text
         assert 'data-i18n="common.not_available"' not in html, path
         assert "C.loadMe()" in html and "C.goLogin()" in html, path
@@ -247,8 +247,8 @@ def test_druck_badge_page_layout_and_blob_flow(client):
     assert 'id="login-form"' in html and "C.getExpertPassword()" in html
     assert 'class="print-label print-label--badge"' in html
     assert 'id="badge-name"' in html and 'id="badge-code"' in html
-    # the box label branch stays a stub until T6
-    assert 'id="label-stub"' in html and 'data-i18n="common.not_available"' in html
+    # the box label branch is a real view now
+    assert 'id="label-stub"' not in html and 'id="label-view"' in html
     css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
     assert re.search(r"\.badge-label__qr\s*\{[^}]*width:\s*30mm", css)
     assert "--mono" in css and "badge-label__code" in css
@@ -387,3 +387,56 @@ def test_pack_css_has_the_packen_pieces():
 def test_app_js_api_errors_carry_the_body():
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert "data: data" in js
+
+
+def test_pruefen_page_markup(client):
+    html = client.get("/pruefen/7").text
+    for element_id in ("chk-head", "chk-order", "chk-packers", "chk-attempt", "chk-body", "chk-actions"):
+        assert f'id="{element_id}"' in html, element_id
+    # camera only through a file input (plain HTTP), box photo downscaled before upload
+    assert 'input.accept = "image/*"' in html and 'setAttribute("capture", "environment")' in html
+    assert "C.downscaleImage(boxPhoto, 1600, 0.9)" in html
+    assert "/api/jobs/" in html and "/check" in html and "/ship" in html
+    assert 'form.append("result", "ok")' in html and 'form.append("result", "rejected")' in html
+    assert 'err.status === 403' in html and "/druck/etikett/" in html and 'target = "_blank"' in html
+    for key in ("check.release", "check.reject", "check.box_photo", "check.print_label", "check.packed_by",
+                "check.attempt", "check.state_extra", "jobs.ship"):
+        assert f'"{key}"' in html, key
+    assert "C.loadMe()" in html and "C.goLogin()" in html
+
+
+def test_druck_label_branch_markup(client):
+    html = client.get("/druck/etikett/7").text
+    for element_id in ("label-view", "label-box", "label-text", "label-qr", "label-print-btn"):
+        assert f'id="{element_id}"' in html, element_id
+    assert 'class="print-label print-label--box"' in html
+    assert "/api/jobs/" in html and "/label" in html and "/qr.svg" in html
+    assert "noRedirect: true" in html and "C.expertApi(path)" in html and "C.getExpertPassword()" in html
+    assert 'C.t("label.rma")' in html and 'C.t("label.unchecked")' in html
+    assert "window.print()" in html
+
+
+def test_label_css_has_box_label_rules():
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    assert "print-label--box" in css and "box-label__qr" in css
+    assert re.search(r"\.box-label__qr\s*\{[^}]*width:\s*28mm", css)
+    assert "@media print" in css and "body.print .nav," in css and "body.print .no-print," in css
+
+
+def test_auftraege_has_label_link_for_checked_jobs(client):
+    html = client.get("/auftraege").text
+    assert '"/druck/etikett/" + job.id' in html and 'job.status === "checked" || job.status === "shipped"' in html
+
+
+def test_check_and_label_strings_exist_in_german():
+    strings = _strings()
+    assert strings["check.release"] == "Freigeben"
+    assert strings["check.reject"] == "Zurück an Packer"
+    assert strings["check.box_photo"] == "Foto vom Karton"
+    assert strings["check.print_label"] == "Etikett drucken"
+    assert strings["label.unchecked"] == "ohne Prüfung"
+    assert strings["error.same_worker"]
+    for name in ("pruefen.html", "druck.html", "auftraege.html"):
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        for key in set(re.findall(r'"((?:check|label)\.[\w]+)"', text)):
+            assert key in strings, (name, key)

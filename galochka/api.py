@@ -49,6 +49,8 @@ def _read_upload(upload: UploadFile) -> bytes:
 
 # ValueError codes from repo that are state conflicts (409); every other code is a 400.
 _CONFLICT_CODES = {"wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate"}
+# Rule violations about who may act (403).
+_FORBIDDEN_CODES = {"same_worker"}
 
 
 def job_error(e: ValueError) -> HTTPException:
@@ -59,7 +61,8 @@ def job_error(e: ValueError) -> HTTPException:
     key = f"error.{code}"
     if key not in _strings:
         return HTTPException(status_code=400, detail=t("error.invalid_request"))
-    return HTTPException(status_code=409 if code in _CONFLICT_CODES else 400, detail=_strings[key])
+    status = 409 if code in _CONFLICT_CODES else 403 if code in _FORBIDDEN_CODES else 400
+    return HTTPException(status_code=status, detail=_strings[key])
 
 
 @contextmanager
@@ -367,6 +370,9 @@ def create_app(settings: Settings) -> FastAPI:
             data["second_check"] = repo.second_check_applies(conn, job)
             data["attempt"] = job["attempt"]
             data["open_line_ids"] = repo.open_line_ids(conn, job_id, job["stage"], job["attempt"])
+            data["packer_names"] = repo.packer_names(conn, job)
+            data["packer_ids"] = [r["id"] for r in repo.current_confirmers(conn, job)]
+            data["checks"] = repo.list_checks(conn, job_id)
         # Cassandra calls (prefetch with a 2 s budget, then cache reads) happen outside the lock.
         photo_ids = {row["photo_item_id"] or row["item_id"] for row, _ in lines} - {None}
         client = app.state.cassandra
@@ -381,7 +387,6 @@ def create_app(settings: Settings) -> FastAPI:
             )
             data["lines"].append(line)
         data["repair_notes"] = []  # filled by the RMA task
-        data["checks"] = []  # filled by the second-check task
         return data
 
     @app.post("/api/jobs/{job_id}/claim")
@@ -494,6 +499,62 @@ def create_app(settings: Settings) -> FastAPI:
             return JSONResponse(
                 status_code=409, content={"detail": t("error.lines_open"), "open_line_ids": e.line_ids}
             )
+
+    @app.post("/api/jobs/{job_id}/check", status_code=201)
+    def check_job(
+        job_id: int,
+        result: str = Form(...),
+        note: str = Form(""),
+        image: UploadFile | None = File(None),
+        worker=Depends(require_worker),
+    ):
+        note = note.strip()
+        # 1. All rules first, under the lock, so a bad request never costs an image decode.
+        with lock:
+            with db_write(conn):
+                error = repo.check_blocker(conn, job_id, worker["id"], result, note, image is not None)
+                if error:
+                    raise ValueError(error)
+        # 2. Decode, normalise and write the box photo outside the lock.
+        photo_path = ""
+        if image is not None:
+            try:
+                data = images.normalize(_read_upload(image))
+            except images.BadImage:
+                raise HTTPException(status_code=400, detail=t("error.bad_image"))
+            photo_path = images.save_photo(settings.photos_dir, f"jobs/{job_id}", data)
+        # 3. Re-check and INSERT under the lock; a failed insert removes the file again.
+        now = _now()
+        try:
+            with lock:
+                with db_write(conn):
+                    check_id = repo.add_check(conn, job_id, worker["id"], result, note, photo_path, now, commit=False)
+                    audit(conn, now, f"worker:{worker['id']}", "job.check", "job", job_id,
+                          {"check_id": check_id, "result": result, "note": note, "photo": bool(photo_path)})
+                check = repo.get_check(conn, check_id)
+                job_json = _job_dict(job_id)
+        except Exception:
+            if photo_path:
+                (settings.photos_dir / photo_path).unlink(missing_ok=True)
+            raise
+        return {"check": check, "job": job_json}
+
+    @app.get("/api/jobs/{job_id}/qr.svg")
+    def job_qr(job_id: int):
+        # Unauthenticated on purpose: the job id is not a secret and the label page loads it as <img>.
+        with lock:
+            exists = repo.get_job(conn, job_id) is not None
+        if not exists:
+            raise HTTPException(status_code=404, detail=t("error.not_found"))
+        return Response(content=qr.make_svg(f"galochka:job:{job_id}"), media_type="image/svg+xml")
+
+    @app.get("/api/jobs/{job_id}/label", dependencies=[Depends(require_worker_or_expert)])
+    def job_label(job_id: int):
+        with lock:
+            data = repo.label_data(conn, job_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail=t("error.not_found"))
+        return data
 
     @app.post("/api/jobs/{job_id}/ship")
     def ship_job(job_id: int, worker=Depends(require_worker_or_expert)):

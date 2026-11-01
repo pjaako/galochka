@@ -6,7 +6,7 @@
   <title data-i18n="check.title">galochka</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="pack">
   <nav class="nav">
     <img src="/static/acs_logo.png" alt="ACS" width="32" height="32" class="nav__logo">
     <span class="nav__brand" data-i18n="nav.brand"></span>
@@ -17,13 +17,372 @@
     <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
   </nav>
   <main class="main">
-    <h1 data-i18n="check.title"></h1>
-    <p class="note" data-i18n="common.not_available"></p>
+    <header class="pack-head" id="chk-head" hidden>
+      <h1 class="pack-head__order" id="chk-order"></h1>
+      <p class="pack-head__meta" id="chk-meta"></p>
+      <p class="pack-head__meta" id="chk-packers"></p>
+      <p class="chk-banner" id="chk-attempt" hidden></p>
+      <p class="chk-banner chk-banner--reject" id="chk-last-reject" hidden></p>
+    </header>
+
+    <p class="note" id="chk-locked" role="alert" hidden></p>
+    <div id="chk-body"></div>
+    <div id="chk-actions" class="pack-actions" hidden></div>
   </main>
 
   <script src="/static/app.js"></script>
   <script>
     (function () {
+      var jobId = parseInt(window.location.pathname.split("/").pop(), 10);
+
+      var me = null;
+      var job = null; // GET /api/jobs/{id}
+      var view = "review"; // "review" | "reject" | "released" | "other" (status is not packed)
+      var busy = false;
+      var locked = false; // the server said same_worker: the actions stay off
+      var boxPhoto = null; // File of the box photo
+      var boxPhotoUrl = null;
+      var rejectNote = "";
+      var shipped = false;
+
+      var headEl = document.getElementById("chk-head");
+      var orderEl = document.getElementById("chk-order");
+      var metaEl = document.getElementById("chk-meta");
+      var packersEl = document.getElementById("chk-packers");
+      var attemptEl = document.getElementById("chk-attempt");
+      var lastRejectEl = document.getElementById("chk-last-reject");
+      var lockedEl = document.getElementById("chk-locked");
+      var bodyEl = document.getElementById("chk-body");
+      var actionsEl = document.getElementById("chk-actions");
+
+      function reportError(err) {
+        C.toast((err && err.detail) || C.t("error.generic"));
+      }
+
+      function clearNode(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+      }
+
+      function el(tagName, className, text) {
+        var node = document.createElement(tagName);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function button(label, className, onClick) {
+        var btn = el("button", "btn " + (className || ""), label);
+        btn.type = "button";
+        if (onClick) btn.addEventListener("click", onClick);
+        return btn;
+      }
+
+      function setBusy(value) {
+        busy = value;
+        renderActions();
+      }
+
+      // --- lines --------------------------------------------------------------------------------
+
+      // ok | missing | not_ok | withheld | open (nothing confirmed in this attempt; cannot happen once packed)
+      function lineState(line) {
+        if (line.withheld) return "withheld";
+        var latest = line.latest;
+        if (!latest || latest.attempt !== job.attempt) return "open";
+        return latest.result;
+      }
+
+      function stateBadge(state) {
+        return el("span", "state-badge state-badge--" + state, C.t("pack.state_" + state));
+      }
+
+      function thumb(url, label) {
+        var link = el("a", "chk-thumb");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.title = C.t("check.photo_open");
+        var img = el("img");
+        img.src = url;
+        img.alt = C.fmt(C.t("check.photo_alt"), { label: label });
+        img.loading = "lazy";
+        img.draggable = false;
+        link.appendChild(img);
+        return link;
+      }
+
+      function lineRow(line, i) {
+        var state = lineState(line);
+        var extra = line.source !== "template";
+        var cls = "sum-row chk-row sum-row--" + state;
+        if (extra && state !== "missing" && state !== "not_ok") cls += " sum-row--worker";
+        var row = el("div", cls);
+        row.setAttribute("data-line-id", String(line.id));
+        row.setAttribute("data-state", state);
+        var head = el("div", "sum-row__head");
+        head.appendChild(el("span", "sum-row__label", (i + 1) + ". " + line.label + " × " + line.qty));
+        head.appendChild(stateBadge(state));
+        if (extra) head.appendChild(el("span", "state-badge state-badge--extra", C.t("check.state_extra")));
+        row.appendChild(head);
+
+        var meta = [];
+        if (line.item_id) meta.push(line.item_id);
+        if (extra) meta.push(C.t(line.source === "office" ? "pack.source_office" : "pack.source_worker"));
+        var latest = line.latest;
+        if (state === "withheld") {
+          meta.push(C.fmt(C.t("pack.withheld"), { reason: line.withheld_reason || "" }));
+        } else if (latest) {
+          meta.push(C.fmt(C.t("pack.by"), { name: latest.worker_name }));
+          if (latest.result !== "ok") meta.push(C.fmt(C.t("pack.present_qty"), { n: latest.qty, total: line.qty }));
+          if (latest.reason) meta.push(C.fmt(C.t("pack.reason_line"), { reason: latest.reason }));
+          if (latest.serials && latest.serials.length) meta.push(C.fmt(C.t("pack.serials_line"), { list: latest.serials.join(", ") }));
+        }
+        if (extra && line.reason && !(latest && latest.reason === line.reason)) {
+          meta.push(C.fmt(C.t("pack.reason_line"), { reason: line.reason }));
+        }
+        if (meta.length) row.appendChild(el("div", "sum-row__meta", meta.join(" · ")));
+        if (latest && latest.photo_url && state !== "withheld") {
+          var thumbs = el("div", "chk-thumbs");
+          thumbs.appendChild(thumb(latest.photo_url, line.label));
+          row.appendChild(thumbs);
+        }
+        return row;
+      }
+
+      // --- header ---------------------------------------------------------------------------------
+
+      function renderHead() {
+        headEl.hidden = false;
+        orderEl.textContent = job.order_ref + (job.customer ? " – " + job.customer : "");
+        var meta = [job.template_name];
+        if (job.unit_count > 1) meta.push(C.fmt(C.t("pack.carton"), { n: job.unit_no, total: job.unit_count }));
+        metaEl.textContent = meta.join(" · ");
+        var packers = job.packer_names || [];
+        packersEl.textContent = packers.length ? C.fmt(C.t("check.packed_by"), { names: packers.join(", ") }) : "";
+        packersEl.hidden = !packers.length;
+        var retry = job.status === "packed" && job.attempt > 1;
+        attemptEl.hidden = !retry;
+        if (retry) attemptEl.textContent = C.fmt(C.t("check.attempt"), { n: job.attempt });
+        lastRejectEl.hidden = true;
+        if (retry) {
+          (job.checks || []).some(function (check) {
+            if (check.result !== "rejected") return false;
+            lastRejectEl.textContent = C.fmt(C.t("check.last_reject"), { name: check.worker_name, note: check.note });
+            lastRejectEl.hidden = false;
+            return true;
+          });
+        }
+      }
+
+      // --- body ---------------------------------------------------------------------------------
+
+      function revokeBoxPhoto() {
+        if (boxPhotoUrl) {
+          try { URL.revokeObjectURL(boxPhotoUrl); } catch (e) { /* ignore */ }
+        }
+        boxPhotoUrl = null;
+      }
+
+      function renderBoxPhoto(wrap) {
+        clearNode(wrap);
+        if (boxPhotoUrl) {
+          var img = el("img", "pack-photo");
+          img.src = boxPhotoUrl;
+          img.alt = C.t("check.box_photo_alt");
+          wrap.appendChild(img);
+        }
+        var label = el("label", "photo-button" + (boxPhoto ? " photo-button--done" : ""));
+        label.appendChild(el("span", "", C.t(boxPhoto ? "check.box_photo_retake" : "check.box_photo") + " ★"));
+        var input = el("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.setAttribute("capture", "environment");
+        input.hidden = true;
+        input.addEventListener("change", function () {
+          var file = input.files && input.files[0];
+          if (!file) return;
+          revokeBoxPhoto();
+          boxPhoto = file;
+          boxPhotoUrl = URL.createObjectURL(file);
+          renderBoxPhoto(wrap);
+        });
+        label.appendChild(input);
+        wrap.appendChild(label);
+        wrap.appendChild(el("p", "pack-photo-hint", "★ " + C.t("check.box_photo_required")));
+      }
+
+      function renderReview() {
+        var box = el("div", "pack-line");
+        box.appendChild(el("h2", "pack-line__label", C.t("pack.summary_title")));
+        var list = el("div", "sum-list");
+        (job.lines || []).forEach(function (line, i) { list.appendChild(lineRow(line, i)); });
+        box.appendChild(list);
+        var boxBlock = el("div", "chk-box");
+        boxBlock.appendChild(el("h2", "pack-line__label", C.t("check.box_title")));
+        var wrap = el("div", "chk-box__photo");
+        boxBlock.appendChild(wrap);
+        renderBoxPhoto(wrap);
+        box.appendChild(boxBlock);
+        bodyEl.appendChild(box);
+      }
+
+      function renderReject() {
+        var box = el("div", "pack-panel pack-panel--bad");
+        box.appendChild(el("p", "pack-block__title", C.t("check.reject_title")));
+        var area = el("textarea");
+        area.rows = 4;
+        area.id = "chk-reject-note";
+        area.setAttribute("data-reason", "");
+        area.placeholder = C.t("check.reject_placeholder");
+        area.value = rejectNote;
+        area.addEventListener("input", function () { rejectNote = area.value; });
+        box.appendChild(area);
+        bodyEl.appendChild(box);
+      }
+
+      function renderOther() {
+        var box = el("div", "pack-line");
+        box.appendChild(el("p", "note", C.fmt(C.t("check.not_checkable"), { status: C.t("status." + job.status) })));
+        var back = el("a", "btn btn--primary", C.t("pack.to_overview"));
+        back.href = "/auftraege";
+        box.appendChild(back);
+        bodyEl.appendChild(box);
+      }
+
+      function renderReleased() {
+        var box = el("div", "pack-result");
+        box.id = "chk-released";
+        box.appendChild(el("p", "", C.t("check.released")));
+        var label = el("a", "btn btn--primary", C.t("check.print_label"));
+        label.id = "chk-print-label";
+        label.href = "/druck/etikett/" + job.id;
+        label.target = "_blank";
+        label.rel = "noopener";
+        box.appendChild(label);
+        if (!shipped) box.appendChild(button(C.t("jobs.ship"), "btn--secondary", ship));
+        var overview = el("a", "btn btn--secondary", C.t("pack.to_overview"));
+        overview.href = "/auftraege";
+        box.appendChild(overview);
+        box.appendChild(button(C.t("pack.logout_done"), "btn--secondary", function () { C.logout(); }));
+        bodyEl.appendChild(box);
+      }
+
+      function renderActions() {
+        clearNode(actionsEl);
+        var show = false;
+        if (view === "review" && !locked) {
+          show = true;
+          actionsEl.appendChild(actionButton(C.t("check.reject"), "btn--danger", function () { showReject(); }));
+          actionsEl.appendChild(actionButton(C.t("check.release"), "btn--primary", release));
+        } else if (view === "reject" && !locked) {
+          show = true;
+          actionsEl.appendChild(actionButton(C.t("pack.cancel"), "", function () { view = "review"; renderAll(); }));
+          actionsEl.appendChild(actionButton(C.t("check.reject_send"), "btn--danger", reject));
+        }
+        actionsEl.hidden = !show;
+      }
+
+      function actionButton(label, className, onClick) {
+        var btn = button(label, className + (busy ? " btn--working" : ""), onClick);
+        btn.disabled = busy;
+        return btn;
+      }
+
+      function renderAll() {
+        lockedEl.hidden = !locked;
+        if (locked) lockedEl.textContent = C.t("check.same_worker_note");
+        renderHead();
+        clearNode(bodyEl);
+        if (view === "review") renderReview();
+        else if (view === "reject") renderReject();
+        else if (view === "released") renderReleased();
+        else renderOther();
+        renderActions();
+      }
+
+      // --- actions ----------------------------------------------------------------------------------
+
+      function showReject() {
+        if (busy) return;
+        view = "reject";
+        window.scrollTo(0, 0);
+        renderAll();
+        var area = document.getElementById("chk-reject-note");
+        if (area) area.focus();
+      }
+
+      function handleCheckError(err) {
+        reportError(err);
+        if (err && err.status === 403) {
+          locked = true;
+          view = "review";
+        }
+        setBusy(false);
+        renderAll();
+      }
+
+      async function release() {
+        if (busy) return;
+        if (!boxPhoto) {
+          C.toast(C.t("check.box_photo_required"));
+          return;
+        }
+        setBusy(true);
+        try {
+          var blob = await C.downscaleImage(boxPhoto, 1600, 0.9);
+          var form = new FormData();
+          form.append("result", "ok");
+          form.append("note", "");
+          form.append("image", blob, "box.jpg");
+          var answer = await C.api("/api/jobs/" + jobId + "/check", { formData: form });
+          job.status = answer.job.status;
+          revokeBoxPhoto();
+          busy = false;
+          view = "released";
+          window.scrollTo(0, 0);
+          renderAll();
+        } catch (err) {
+          handleCheckError(err);
+        }
+      }
+
+      async function reject() {
+        if (busy) return;
+        var note = rejectNote.trim();
+        if (note.length < 3) {
+          C.toast(C.t("error.reason_required"));
+          return;
+        }
+        setBusy(true);
+        try {
+          var form = new FormData();
+          form.append("result", "rejected");
+          form.append("note", note);
+          await C.api("/api/jobs/" + jobId + "/check", { formData: form });
+          C.toast(C.t("check.rejected"));
+          setTimeout(function () { window.location.href = "/auftraege"; }, 900);
+        } catch (err) {
+          handleCheckError(err);
+        }
+      }
+
+      async function ship() {
+        if (busy) return;
+        busy = true;
+        try {
+          await C.api("/api/jobs/" + jobId + "/ship", { method: "POST" });
+          shipped = true;
+          C.toast(C.t("jobs.shipped"));
+          busy = false;
+          renderAll();
+        } catch (err) {
+          busy = false;
+          reportError(err);
+        }
+      }
+
+      // --- loading ----------------------------------------------------------------------------------
+
       async function init() {
         try {
           await C.loadStrings();
@@ -31,10 +390,23 @@
           C.toast(C.t("error.generic"));
         }
         // No valid session: go to the badge login and come back here afterwards.
-        var worker = await C.loadMe();
-        if (!worker) {
+        me = await C.loadMe();
+        if (!me) {
           C.goLogin();
+          return;
         }
+        try {
+          job = await C.api("/api/jobs/" + jobId);
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        if (job.status !== "packed") {
+          view = "other";
+        } else if ((job.packer_ids || []).indexOf(me.id) !== -1) {
+          locked = true; // the server enforces it too; this only saves the round trip
+        }
+        renderAll();
       }
       init();
     })();

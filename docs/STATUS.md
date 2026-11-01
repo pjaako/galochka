@@ -45,5 +45,11 @@ Updated: 2026-11-01
   `GET /api/expert/jobs`). Playwright tests run for real against the pre-installed
   Chromium (`/opt/pw-browsers`). Suite: 506 passed, 2 skipped.
 
+- T6 (2026-11-01, Sonnet, reviewed): second check (`POST /api/jobs/{id}/check`: box
+  photo on release, reason on rejection, different worker than the packers, rejection
+  reopens all lines as attempt n+1), Prüfen page with evidence review, job QR,
+  `GET /api/jobs/{id}/label`, Dymo 36×89 mm box label print page (print verified as one
+  page via PDF in the browser test). Suite: 534 passed, 2 skipped.
+
 ## Next
-- T6 Second check + box label.
+- T7a RMA backend.

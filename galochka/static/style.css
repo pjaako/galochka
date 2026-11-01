@@ -577,6 +577,10 @@ body.print .print-label {
     line-height: 1.2;
   }
 
+  body.print .main {
+    padding: 0;
+  }
+
   body.print .nav,
   body.print .footer,
   body.print .no-print,
@@ -1368,6 +1372,112 @@ body.pack .toast {
 
 .pack-result .btn {
   margin-top: 8px;
+}
+
+/* ============================================================
+   PRUEFEN (second check) and the box label
+   ============================================================ */
+.chk-banner {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--yellow);
+  border-left-width: 8px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font: 600 15px/1.4 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.chk-banner--reject {
+  border-color: var(--red);
+  font-weight: 400;
+}
+
+.chk-row {
+  cursor: default;
+}
+
+.state-badge--extra {
+  background: var(--yellow);
+}
+
+.chk-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chk-thumb {
+  display: block;
+  width: 72px;
+  height: 72px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.chk-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chk-box {
+  margin-top: 24px;
+}
+
+/* Box label on the 36 x 89 mm label: text left, QR right. */
+body.print .print-label--box {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 2mm;
+  box-sizing: border-box;
+  padding: 1mm;
+  margin-top: 16px;
+  border: 1px dashed var(--line);
+}
+
+.box-label__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.box-label__order {
+  font: 700 17pt/1.1 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.box-label__line {
+  margin-top: 0.8mm;
+  font: 400 9pt/1.15 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.box-label__line--strong {
+  font-weight: 600;
+}
+
+.box-label__qr {
+  display: block;
+  align-self: center;
+  width: 28mm;
+  height: 28mm;
+  flex-shrink: 0;
+}
+
+@media print {
+  body.print .print-label--box {
+    margin: 0;
+    border: none;
+  }
 }
 
 /* ============================================================
