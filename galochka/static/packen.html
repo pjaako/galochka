@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="pack.title">galochka</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="nav">
+    <img src="/static/acs_logo.png" alt="ACS" width="32" height="32" class="nav__logo">
+    <span class="nav__brand" data-i18n="nav.brand"></span>
+    <div class="nav__links">
+      <a href="/auftraege" data-i18n="nav.jobs"></a>
+    </div>
+    <span class="nav__user" id="nav-user"></span>
+    <!-- Logout is wired up and shown by T3 (sessions). -->
+    <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
+  </nav>
+  <main class="main">
+    <h1 data-i18n="pack.title"></h1>
+    <p class="note" data-i18n="common.not_available"></p>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (function () {
+      async function init() {
+        try {
+          await C.loadStrings();
+        } catch (err) {
+          C.toast(C.t("error.generic"));
+        }
+      }
+      init();
+    })();
+  </script>
+</body>
+</html>

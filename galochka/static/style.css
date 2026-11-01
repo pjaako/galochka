@@ -1,0 +1,601 @@
+/* ============================================================
+   TOKENS
+   ============================================================ */
+:root {
+  --bg: #efefec;
+  --surface: #ffffff;
+  --fg: #1b1c1a;
+  --muted: #5f625c;
+  --line: #c9cbc4;
+  --brand: #007cc5;
+  --brand-ink: #ffffff;
+  --green: #2e7d32;
+  --yellow: #c77700;
+  --red: #b3261e;
+  --radius: 4px;
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15161a;
+    --surface: #1f2126;
+    --fg: #ecedea;
+    --muted: #a0a39e;
+    --line: #33363c;
+    --brand: #4fb0f0;
+    --green: #5cb860;
+    --yellow: #e9a23b;
+    --red: #e5534b;
+  }
+}
+
+/* ============================================================
+   FONTS
+   ============================================================ */
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/IBMPlexSans-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/IBMPlexSans-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 16px 32px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+@media (min-width: 480px) {
+  body {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+}
+
+h1 {
+  font: 600 28px/1.4 var(--font);
+  margin: 24px 0 16px;
+}
+
+h2 {
+  font: 600 20px/1.4 var(--font);
+  margin: 24px 0 8px;
+}
+
+p {
+  margin: 8px 0;
+}
+
+a {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   LAYOUT
+   ============================================================ */
+.main {
+  padding-top: 16px;
+}
+
+.note {
+  border-left: 4px solid var(--brand);
+  padding: 12px;
+  margin-top: 16px;
+}
+
+/* ============================================================
+   NAV
+   ============================================================ */
+.nav {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  height: 56px;
+  margin: 0 -16px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+@media (min-width: 480px) {
+  .nav {
+    margin: 0 -24px;
+    padding: 0 24px;
+  }
+}
+
+.nav__logo {
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.nav__brand {
+  align-self: center;
+  font: 600 16px/1.4 var(--font);
+  margin-right: auto;
+}
+
+.nav__links {
+  display: flex;
+  gap: 16px;
+}
+
+/* Name of the logged-in worker (filled in by T3); empty until then. */
+.nav__user {
+  align-self: center;
+  font: 600 16px/1.4 var(--font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  color: var(--fg);
+  font: 500 16px/1.4 var(--font);
+  border-bottom: 3px solid transparent;
+}
+
+.nav a[aria-current="page"] {
+  border-bottom-color: var(--brand);
+}
+
+.footer {
+  margin-top: 32px;
+  font-size: 13px;
+}
+
+/* ============================================================
+   CARDS
+   ============================================================ */
+.results {
+  display: flex;
+  flex-direction: column;
+  margin-top: 16px;
+}
+
+.card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "body thumb"
+    "actions actions";
+  gap: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 12px 12px 16px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  background: var(--line);
+}
+
+.card--green::before {
+  background: var(--green);
+}
+
+.card--yellow::before {
+  background: var(--yellow);
+}
+
+.card--red::before {
+  background: var(--red);
+}
+
+.card--green,
+.card--yellow,
+.card--red {
+  border-width: 2px;
+}
+
+.card--green {
+  border-color: var(--green);
+}
+
+.card--yellow {
+  border-color: var(--yellow);
+}
+
+.card--red {
+  border-color: var(--red);
+}
+
+.card__body {
+  grid-area: body;
+  min-width: 0;
+}
+
+.card__id {
+  font: 500 20px/1.4 var(--mono);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.card__name {
+  font: 500 16px/1.4 var(--font);
+  margin-top: 4px;
+}
+
+.card__meta {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.card__score {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.card__thumb {
+  grid-area: thumb;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.card__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.card__actions {
+  grid-area: actions;
+  display: flex;
+  gap: 8px;
+}
+
+.card__actions .btn {
+  flex: 1;
+  width: auto;
+}
+
+/* ============================================================
+   PHOTO TILES
+   Shared tile for every photo of a part: contain, never cover —
+   the server already crops to the part, so the UI must not crop
+   again. Applies whether the tile is an <img> itself or a wrapper
+   around one (used for a placeholder mark when there is no photo).
+   ============================================================ */
+.photo-tile {
+  display: block;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.photo-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+img.photo-tile {
+  object-fit: contain;
+}
+
+.photo-tile--empty {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+}
+
+.photo-tile__mark {
+  color: var(--muted);
+  line-height: 1;
+}
+
+/* ============================================================
+   BUTTONS AND INPUTS
+   ============================================================ */
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+  font: 500 16px/1.4 var(--font);
+  cursor: pointer;
+  text-align: center;
+}
+
+.btn--primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--brand-ink);
+}
+
+.btn--secondary {
+  border: 2px solid var(--brand);
+  background: var(--surface);
+  color: var(--brand);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.input-id,
+.select {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+  font: 400 16px/1.4 var(--font);
+}
+
+.photo-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  width: 100%;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font: 500 16px/1.4 var(--font);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+}
+
+.photo-button--working {
+  opacity: 0.6;
+}
+
+/* ============================================================
+   TOAST
+   ============================================================ */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translate(-50%, 8px);
+  background: var(--fg);
+  color: var(--bg);
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  max-width: 600px;
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+}
+
+.toast--visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ============================================================
+   TABS AND FIELDS
+   ============================================================ */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab-btn {
+  min-height: 48px;
+  padding: 0 12px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--fg);
+  font: 500 16px/1.4 var(--font);
+  cursor: pointer;
+}
+
+.tab-btn[aria-pressed="true"] {
+  border-bottom-color: var(--brand);
+}
+
+.tab-section {
+  margin-top: 16px;
+}
+
+.settings-section {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  margin-top: 24px;
+}
+
+.settings-section h2 {
+  margin-top: 0;
+}
+
+.field {
+  margin-top: 16px;
+}
+
+.field__label {
+  display: block;
+  font: 500 16px/1.4 var(--font);
+}
+
+.field__help {
+  margin: 2px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field__checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 16px/1.4 var(--font);
+  cursor: pointer;
+}
+
+.field__checkbox-row input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+textarea.input-id {
+  min-height: 96px;
+  padding: 8px 12px;
+  resize: vertical;
+}
+
+.form-actions {
+  margin-top: 16px;
+}
+
+/* ============================================================
+   PRINT
+   Dymo large address labels (36 x 89 mm), printed from the office PC.
+   @page is global CSS; the label layout below only applies to druck.html,
+   whose <body> carries class="print". One .print-label per page.
+   ============================================================ */
+@page {
+  size: 89mm 36mm;
+  margin: 2mm;
+}
+
+body.print .print-label {
+  width: 85mm;
+  height: 32mm;
+  overflow: hidden;
+  background: #fff;
+  color: #000;
+  page-break-after: always;
+  break-after: page;
+}
+
+@media print {
+  body.print {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    background: #fff;
+    color: #000;
+    font-size: 10pt;
+    line-height: 1.2;
+  }
+
+  body.print .nav,
+  body.print .footer,
+  body.print .no-print,
+  body.print .toast {
+    display: none !important;
+  }
+}
+
+/* ============================================================
+   HIDDEN OVERRIDE
+   Controller ruling: the one permitted !important. Several component
+   rules above (.btn, .note, .tab-section, form containers, …) set their
+   own `display`, which — being author CSS — otherwise beats the
+   browser's default `[hidden] { display: none }` (a user-agent rule,
+   always lowest priority regardless of specificity). Without this, an
+   element that is both `hidden` and e.g. `.btn`/`.note` stays visible.
+   Kept last in the file and !important so it wins over everything above
+   it, whatever gets added later.
+   ============================================================ */
+[hidden] {
+  display: none !important;
+}

@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="expert.title">galochka</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="nav">
+    <img src="/static/acs_logo.png" alt="ACS" width="32" height="32" class="nav__logo">
+    <span class="nav__brand" data-i18n="nav.brand"></span>
+    <div class="nav__links">
+      <a href="/auftraege" data-i18n="nav.jobs"></a>
+    </div>
+  </nav>
+  <main class="main">
+    <h1 data-i18n="expert.title"></h1>
+
+    <form id="login-form" class="login-form">
+      <input type="password" id="password-input" class="input-id" data-i18n-placeholder="expert.password_placeholder"
+        autocomplete="off">
+      <button type="submit" class="btn btn--primary" data-i18n="expert.login"></button>
+    </form>
+
+    <div id="app-view" hidden>
+      <div class="tabs">
+        <button type="button" class="tab-btn" id="tab-btn-artikel" data-tab="artikel" aria-pressed="true" data-i18n="expert.tab_artikel"></button>
+        <button type="button" class="tab-btn" id="tab-btn-vorlagen" data-tab="vorlagen" aria-pressed="false" data-i18n="expert.tab_vorlagen"></button>
+        <button type="button" class="tab-btn" id="tab-btn-auftraege" data-tab="auftraege" aria-pressed="false" data-i18n="expert.tab_auftraege"></button>
+        <button type="button" class="tab-btn" id="tab-btn-mitarbeiter" data-tab="mitarbeiter" aria-pressed="false" data-i18n="expert.tab_mitarbeiter"></button>
+        <button type="button" class="tab-btn" id="tab-btn-einstellungen" data-tab="einstellungen" aria-pressed="false" data-i18n="expert.tab_einstellungen"></button>
+        <button type="button" class="tab-btn" id="tab-btn-berichte" data-tab="berichte" aria-pressed="false" data-i18n="expert.tab_berichte"></button>
+        <button type="button" class="tab-btn" id="tab-btn-export" data-tab="export" aria-pressed="false" data-i18n="expert.tab_export"></button>
+      </div>
+
+      <!-- Later tasks fill these sections (Artikel: T2, Mitarbeiter: T3, Vorlagen: T4, ...). -->
+      <section id="tab-artikel" class="tab-section"></section>
+      <section id="tab-vorlagen" class="tab-section" hidden></section>
+      <section id="tab-auftraege" class="tab-section" hidden></section>
+      <section id="tab-mitarbeiter" class="tab-section" hidden></section>
+
+      <section id="tab-einstellungen" class="tab-section" hidden>
+        <form id="settings-form">
+          <div class="field">
+            <label class="field__checkbox-row" for="second-check-default">
+              <input type="checkbox" id="second-check-default">
+              <span data-i18n="expert.second_check_default"></span>
+            </label>
+            <p class="field__help" data-i18n="expert.second_check_default_help"></p>
+          </div>
+          <div class="field">
+            <label class="field__label" for="session-minutes" data-i18n="expert.session_minutes"></label>
+            <p class="field__help" data-i18n="expert.session_minutes_help"></p>
+            <input type="number" id="session-minutes" class="select" step="1" min="1" max="720">
+          </div>
+          <div class="field">
+            <label class="field__label" for="quality-points" data-i18n="expert.quality_points"></label>
+            <p class="field__help" data-i18n="expert.quality_points_help"></p>
+            <textarea id="quality-points" class="input-id" rows="4"></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="settings-save-btn" class="btn btn--primary" data-i18n="expert.save"></button>
+          </div>
+        </form>
+      </section>
+
+      <section id="tab-berichte" class="tab-section" hidden></section>
+      <section id="tab-export" class="tab-section" hidden></section>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (function () {
+      var loginForm = document.getElementById("login-form");
+      var passwordInput = document.getElementById("password-input");
+      var appView = document.getElementById("app-view");
+
+      var tabButtons = document.querySelectorAll(".tab-btn");
+      var tabNames = ["artikel", "vorlagen", "auftraege", "mitarbeiter", "einstellungen", "berichte", "export"];
+
+      var settingsForm = document.getElementById("settings-form");
+      var secondCheckInput = document.getElementById("second-check-default");
+      var sessionMinutesInput = document.getElementById("session-minutes");
+      var qualityPointsInput = document.getElementById("quality-points");
+
+      function reportError(err) {
+        // expertApi() already shows expert.wrong_password and clears the stored
+        // password on 401; avoid a second, redundant toast here.
+        if (err && err.status === 401) return;
+        C.toast((err && err.detail) || C.t("error.generic"));
+      }
+
+      function showLogin() {
+        appView.hidden = true;
+        loginForm.hidden = false;
+      }
+
+      function showApp() {
+        loginForm.hidden = true;
+        appView.hidden = false;
+      }
+
+      async function expertApi(path, opts) {
+        try {
+          return await C.expertApi(path, opts);
+        } catch (err) {
+          if (err && err.status === 401) {
+            showLogin();
+          }
+          throw err;
+        }
+      }
+
+      function switchTab(name) {
+        tabNames.forEach(function (key) {
+          document.getElementById("tab-" + key).hidden = key !== name;
+        });
+        tabButtons.forEach(function (btn) {
+          btn.setAttribute("aria-pressed", String(btn.getAttribute("data-tab") === name));
+        });
+      }
+
+      function fillSettings(settings) {
+        secondCheckInput.checked = !!settings.second_check_default;
+        sessionMinutesInput.value = String(settings.session_minutes);
+        qualityPointsInput.value = settings.default_quality_points.join("\n");
+      }
+
+      async function loadSettings() {
+        fillSettings(await expertApi("/api/expert/settings"));
+      }
+
+      // Called once the password is known to be good (GET /api/expert/settings
+      // succeeded); the same call fills the Einstellungen tab.
+      async function enter() {
+        await loadSettings();
+        showApp();
+      }
+
+      settingsForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var minutes = Number(sessionMinutesInput.value);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 720) {
+          C.toast(C.t("expert.minutes_invalid"));
+          return;
+        }
+        var points = qualityPointsInput.value
+          .split("\n")
+          .map(function (line) { return line.trim(); })
+          .filter(function (line) { return line !== ""; });
+        if (new Set(points).size !== points.length) {
+          C.toast(C.t("expert.points_duplicate"));
+          return;
+        }
+        try {
+          await expertApi("/api/expert/settings", {
+            method: "PUT",
+            body: {
+              second_check_default: secondCheckInput.checked,
+              session_minutes: minutes,
+              default_quality_points: points,
+            },
+          });
+          await loadSettings();
+          C.toast(C.t("expert.saved"));
+        } catch (err) {
+          reportError(err);
+        }
+      });
+
+      loginForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        C.setExpertPassword(passwordInput.value);
+        passwordInput.value = "";
+        try {
+          await enter();
+        } catch (err) {
+          reportError(err);
+        }
+      });
+
+      tabButtons.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          switchTab(btn.getAttribute("data-tab"));
+        });
+      });
+
+      async function init() {
+        try {
+          await C.loadStrings();
+        } catch (err) {
+          C.toast(C.t("error.generic"));
+        }
+        // A password kept in sessionStorage survives a reload of the tab.
+        if (C.getExpertPassword()) {
+          try {
+            await enter();
+          } catch (err) {
+            reportError(err);
+          }
+        }
+      }
+      init();
+    })();
+  </script>
+</body>
+</html>

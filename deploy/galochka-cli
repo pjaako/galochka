@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Production wrapper around `galochka`: loads the service's environment and
+# runs the command as the `galochka` user, e.g. `sudo galochka-cli migrate`.
+set -euo pipefail
+
+set -a
+. /etc/galochka.env
+set +a
+
+exec sudo -u galochka --preserve-env=GALOCHKA_DATA,GALOCHKA_PORT,GALOCHKA_EXPERT_PASSWORD,GALOCHKA_CASSANDRA_URL \
+  /opt/galochka/.venv/bin/galochka "$@"

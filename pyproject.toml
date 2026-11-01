@@ -1,0 +1,32 @@
+[project]
+name = "galochka"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "pillow",
+    "zxing-cpp",
+    "qrcode",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+browser = ["playwright"]
+
+[project.scripts]
+galochka = "galochka.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["galochka*"]
+
+[tool.setuptools.package-data]
+galochka = ["migrations/*.sql", "static/*", "static/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

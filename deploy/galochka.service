@@ -1,0 +1,17 @@
+[Unit]
+Description=galochka packing checklists and RMA tracking
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=galochka
+Group=galochka
+EnvironmentFile=/etc/galochka.env
+WorkingDirectory=/opt/galochka
+ExecStart=/opt/galochka/.venv/bin/galochka serve --host 0.0.0.0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
