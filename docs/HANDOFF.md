@@ -186,7 +186,7 @@ restart (they are in the database).
 | Sync button: "Cassandra ist nicht erreichbar" (HTTP 502) | Cassandra down, wrong `GALOCHKA_CASSANDRA_URL`, DNS | `curl http://cassandra.local:8080/api/groups` from the galochka LXC; the catalog is left as it was; CSV import as fallback; the daily sync logs a warning and retries in 24 h |
 | Sync says "nicht konfiguriert" (409) | URL empty in the env file | set it, restart |
 | Empty reference tile | no photo in Cassandra, or Cassandra down | not a blocker; answers cached 10 min (failures 60 s, stale answers served on error) |
-| Items of a big group missing, or deactivated by a sync | a Cassandra group with more than 1000 items is truncated (no offset paging) and items missing from the fetched list are deactivated | check Aktive Artikel after the first sync; known limit, see backlog |
+| Sync shows the warning "unvollständige Liste" | a Cassandra group (or the ungrouped listing) has more than 1000 items; Cassandra has no offset paging. The sync still upserts what it got and deactivates nothing | split the group in MRPeasy, or add paging to Cassandra's `/api/items` (backlog) |
 | Everybody lands on the login page | idle expiry | each authenticated request refreshes the clock; after `session_minutes` without a request the next request gets 401 `session_expired` and the page redirects to `/anmelden?next=…`. Already stored confirmations stay; the action that hit the 401 was not saved and must be repeated after login. Raise the minutes in Einstellungen |
 | Badge scan "Ausweis oder Kurzcode unbekannt oder gesperrt" | revoked/re-issued badge, wrong code | Mitarbeiter, "Neuer Ausweis"; revoking or re-issuing logs the worker out at once |
 | "Die Prüfung muss eine andere Person durchführen" (403) | the checker confirmed a line in the current attempt (current stage) | another worker checks. After a rejection only the people who re-confirm lines in the new attempt are excluded |
@@ -212,9 +212,9 @@ restart (they are in the database).
   photo path rather than leave dangling references. Backups grow with `photos/`.
 - **Rate limit on code login.** `POST /api/login/code` has no throttling (6 characters from
   a 32-letter alphabet). Fine on the LAN; add a per-IP delay if the app ever leaves it.
-- **Cassandra paging.** Groups with more than 1000 items are truncated and the missing
-  items get deactivated by the sync. Needs offset paging (or a `since` parameter) in
-  Cassandra's `/api/items`; guard `apply_catalog` against suspiciously small results.
+- **Cassandra paging.** Groups with more than 1000 items are truncated. The sync detects
+  this, warns and skips deactivation, so nothing is lost, but new items beyond the limit
+  are not imported. Needs offset paging (or a `since` parameter) in Cassandra's `/api/items`.
 - Unauthenticated read endpoints by design: `/photos/*` (uuid file names) and
   `/api/jobs/{id}/qr.svg`, plus all HTML pages (data comes from authenticated APIs). Fine on
   the LAN; revisit before any wider exposure.

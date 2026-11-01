@@ -3,6 +3,9 @@
 Items deferred during reviews are collected here.
 
 ## Behaviour
+- Cassandra's `/api/items` has no offset paging: a group with more than 1000 items is
+  imported incompletely. The sync warns and never deactivates items in that case; the
+  fix belongs in Cassandra (paging), see HANDOFF backlog.
 - No rate limit on `POST /api/login/code` (6 chars from a 32-letter alphabet, LAN only).
   Acceptable for now; add a per-IP delay if the app ever leaves the LAN.
 
