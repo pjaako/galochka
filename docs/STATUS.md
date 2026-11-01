@@ -63,5 +63,12 @@ Updated: 2026-11-01
   Aufträge RMA creation and cards, Packen header/notes for returns, RMA label. Browser
   tests cover the whole RMA flow. Suite: 642 passed, 2 skipped.
 
+- T8 (2026-11-01, Sonnet, reviewed): reports. Expert job search (text, serial via
+  json_each, worker, dates, status, kind, paging), job history with every confirmation
+  (superseded ones included), checks, repair notes and audit timeline, open-RMA balance
+  with days open, CSV export (UTF-8 BOM, `;`, CRLF, one row per confirmation / check /
+  repair note, formula-injection guard). Berichte and Export tabs; RMA creation enabled in
+  the expert form. Suite: 668 passed, 2 skipped.
+
 ## Next
-- T8 Reports + CSV export.
+- T9 Hardening: whole-branch review, fix wave, README, HANDOFF, walkthrough.

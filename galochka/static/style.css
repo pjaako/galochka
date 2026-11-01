@@ -94,6 +94,11 @@ body {
   }
 }
 
+/* The expert page has wide tables (reports): more room on a desktop screen. */
+body.wide {
+  max-width: 1100px;
+}
+
 h1 {
   font: 600 28px/1.4 var(--font);
   margin: 24px 0 16px;
@@ -1633,4 +1638,121 @@ body.print .print-label--box {
    ============================================================ */
 [hidden] {
   display: none !important;
+}
+
+/* ============================================================
+   PAGES - Experte: Berichte (search, history, open RMAs) and Export
+   ============================================================ */
+.rep-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 4px;
+}
+
+.rep-status__item {
+  font-weight: 400;
+}
+
+.rep-row {
+  cursor: pointer;
+}
+
+.rep-row:hover,
+.rep-row:focus-visible {
+  background: var(--surface);
+}
+
+.rep-detail {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.rep-detail__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rep-detail__head .btn,
+.rep-rma__head .btn {
+  width: auto;
+  min-height: 36px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.rep-detail h3 {
+  font: 600 16px/1.4 var(--font);
+  margin: 20px 0 8px;
+}
+
+.rep-line {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.rep-line__head,
+.rep-event,
+.rep-rma__head,
+.rep-rma__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.rep-event {
+  margin: 6px 0 6px 12px;
+  font-size: 14px;
+}
+
+.rep-event--old {
+  color: var(--muted);
+}
+
+.rep-kv,
+.rep-time,
+.rep-detail-text {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.rep-thumb {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.rep-audit {
+  margin-top: 20px;
+}
+
+.rep-audit summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.rep-rma {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.rep-rma__line {
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.rep-rma__line--open {
+  color: var(--red);
+  font-weight: 600;
 }

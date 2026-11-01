@@ -374,8 +374,11 @@ def test_experte_auftraege_tab_markup(client):
     for element_id in ("job-form", "job-kind", "job-template", "job-order", "job-customer", "job-count", "job-note",
                        "job-lines", "job-extras", "job-extra-add", "job-create-btn", "job-filter", "job-rows"):
         assert f'id="{element_id}"' in section, element_id
-    # rma is not creatable yet
-    assert re.search(r'<option value="rma"[^>]*\bdisabled\b', section)
+    # rma is creatable by the expert: enabled option, fixed count, "RMA-Nummer" label
+    assert re.search(r'<option value="rma"[^>]*>', section) and not re.search(r'<option value="rma"[^>]*\bdisabled\b', section)
+    assert 'id="job-order-label"' in section and 'id="job-count-field"' in section
+    assert "applyJobKind" in html and "kind: jobKind.value" in html and '"expert.job_rma_order"' in html
+    assert _strings()["expert.job_kind_rma"] == "RMA" and _strings()["expert.job_rma_order"] == "RMA-Nummer"
     for key in ("expert.job_cancel", "expert.job_reopen", "expert.job_label", "expert.job_omit"):
         assert key in html, key
     assert "/api/expert/jobs" in html and "/api/expert/templates/" in html and "/druck/etikett/" in html
@@ -541,3 +544,42 @@ def test_druck_rma_label_shows_only_a_present_check(client):
     rma_branch = html.split("if (rma) {", 1)[1].split("} else {", 1)[0]
     assert "label.checked" in rma_branch and "data.checked_by" in rma_branch
     assert "label.packed" not in rma_branch and "label.unchecked" not in rma_branch
+
+
+def test_experte_berichte_tab_markup(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-berichte".*?</section>', html, re.S).group(0)
+    assert "hidden" in section.split(">", 1)[0]
+    for element_id in ("rep-form", "rep-q", "rep-serial", "rep-worker", "rep-kind", "rep-status", "rep-from", "rep-to",
+                       "rep-search-btn", "rep-reset-btn", "rep-table", "rep-rows", "rep-empty", "rep-more", "rep-detail",
+                       "rma-open-refresh", "rma-open-list", "rma-open-empty"):
+        assert f'id="{element_id}"' in section, element_id
+    assert 'type="date"' in section and 'id="rep-from"' in section
+    for endpoint in ("/api/expert/jobs?", "/history", "/api/expert/rma/open", "/api/expert/workers"):
+        assert endpoint in html, endpoint
+    for key in ("reports.col_deviations", "reports.superseded", "reports.rma_line", "reports.days_open", "rma.act_"):
+        assert key in html, key
+    assert "rep-rma__line--open" in html and "target = \"_blank\"" in html and "noopener" in html
+    assert "innerHTML" not in html  # DOM building only
+    strings = _strings()
+    for key in ("reports.col_order", "reports.col_deviations", "reports.search", "reports.open_rma_title",
+                "reports.days_open", "reports.days_open_one", "reports.days_open_today", "reports.rma_line",
+                "audit.job.create", "audit.job.check", "audit.line.confirm", "audit.repair.note"):
+        assert key in strings, key
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    for selector in (".rep-row", ".rep-detail", ".rep-event", ".rep-thumb", ".rep-rma__line--open", "body.wide"):
+        assert selector in css, selector
+
+
+def test_experte_export_tab_markup(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-export".*?</section>', html, re.S).group(0)
+    assert "hidden" in section.split(">", 1)[0]
+    for element_id in ("export-form", "export-from", "export-to", "export-kind", "export-btn"):
+        assert f'id="{element_id}"' in section, element_id
+    assert 'data-i18n="export.download"' in section
+    assert _strings()["export.download"] == "CSV herunterladen"
+    # the expert header cannot ride on a link: blob fetch + object URL + download attribute
+    assert "/api/expert/export.csv?" in html and "blob: true" in html
+    assert "URL.createObjectURL" in html and "link.download" in html and "URL.revokeObjectURL" in html
+    assert "90 * 24" in html  # default range: last 90 days

@@ -6,7 +6,7 @@
   <title data-i18n="expert.title">galochka</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="wide">
   <nav class="nav">
     <img src="/static/acs_logo.png" alt="ACS" width="32" height="32" class="nav__logo">
     <span class="nav__brand" data-i18n="nav.brand"></span>
@@ -151,22 +151,23 @@
             <label class="field__label" for="job-kind" data-i18n="expert.job_kind"></label>
             <select id="job-kind" class="select">
               <option value="delivery" data-i18n="expert.job_kind_delivery"></option>
-              <option value="rma" data-i18n="expert.job_kind_rma" disabled></option>
+              <option value="rma" data-i18n="expert.job_kind_rma"></option>
             </select>
+            <p class="field__help" id="job-rma-help" data-i18n="expert.job_rma_help" hidden></p>
           </div>
           <div class="field">
             <label class="field__label" for="job-template" data-i18n="expert.job_template"></label>
             <select id="job-template" class="select"></select>
           </div>
           <div class="field">
-            <label class="field__label" for="job-order" data-i18n="expert.job_order"></label>
+            <label class="field__label" id="job-order-label" for="job-order" data-i18n="expert.job_order"></label>
             <input type="text" id="job-order" class="input-id" maxlength="40" autocomplete="off">
           </div>
           <div class="field">
             <label class="field__label" for="job-customer" data-i18n="expert.job_customer"></label>
             <input type="text" id="job-customer" class="input-id" maxlength="80" autocomplete="off">
           </div>
-          <div class="field">
+          <div class="field" id="job-count-field">
             <label class="field__label" for="job-count" data-i18n="expert.job_count"></label>
             <input type="number" id="job-count" class="input-id" min="1" max="20" value="1" inputmode="numeric">
           </div>
@@ -260,8 +261,109 @@
         </form>
       </section>
 
-      <section id="tab-berichte" class="tab-section" hidden></section>
-      <section id="tab-export" class="tab-section" hidden></section>
+      <section id="tab-berichte" class="tab-section" hidden>
+        <form id="rep-form" class="job-form">
+          <h2 data-i18n="reports.search_title"></h2>
+          <div class="field">
+            <label class="field__label" for="rep-q" data-i18n="reports.q"></label>
+            <input type="search" id="rep-q" class="input-id" maxlength="200" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="field__label" for="rep-serial" data-i18n="reports.serial"></label>
+            <input type="text" id="rep-serial" class="input-id" maxlength="200" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="field__label" for="rep-worker" data-i18n="reports.worker"></label>
+            <select id="rep-worker" class="select"></select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="rep-kind" data-i18n="reports.kind"></label>
+            <select id="rep-kind" class="select">
+              <option value="" data-i18n="reports.kind_any"></option>
+              <option value="delivery" data-i18n="expert.job_kind_delivery"></option>
+              <option value="rma" data-i18n="expert.job_kind_rma"></option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field__label" data-i18n="reports.status"></span>
+            <div id="rep-status" class="rep-status"></div>
+          </div>
+          <div class="field">
+            <label class="field__label" for="rep-from" data-i18n="reports.from"></label>
+            <input type="date" id="rep-from" class="select">
+          </div>
+          <div class="field">
+            <label class="field__label" for="rep-to" data-i18n="reports.to"></label>
+            <input type="date" id="rep-to" class="select">
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="rep-search-btn" class="btn btn--primary" data-i18n="reports.search"></button>
+            <button type="button" id="rep-reset-btn" class="btn btn--secondary" data-i18n="reports.reset"></button>
+          </div>
+        </form>
+
+        <div class="settings-section">
+          <h2 data-i18n="reports.results"></h2>
+          <div class="bom-lines">
+            <table class="bom-table job-table" id="rep-table">
+              <thead>
+                <tr>
+                  <th data-i18n="reports.col_order"></th>
+                  <th data-i18n="reports.col_kind"></th>
+                  <th data-i18n="reports.col_template"></th>
+                  <th data-i18n="reports.col_carton"></th>
+                  <th data-i18n="reports.col_status"></th>
+                  <th data-i18n="reports.col_created"></th>
+                  <th data-i18n="reports.col_shipped"></th>
+                  <th data-i18n="reports.col_checked"></th>
+                  <th data-i18n="reports.col_deviations"></th>
+                </tr>
+              </thead>
+              <tbody id="rep-rows"></tbody>
+            </table>
+          </div>
+          <p id="rep-empty" class="field__help" data-i18n="reports.empty" hidden></p>
+          <div class="form-actions">
+            <button type="button" id="rep-more" class="btn btn--secondary" data-i18n="reports.more" hidden></button>
+          </div>
+        </div>
+
+        <div id="rep-detail" class="settings-section rep-detail" hidden></div>
+
+        <div class="settings-section">
+          <h2 data-i18n="reports.open_rma_title"></h2>
+          <div class="form-actions">
+            <button type="button" id="rma-open-refresh" class="btn btn--secondary" data-i18n="reports.open_rma_refresh"></button>
+          </div>
+          <p id="rma-open-empty" class="field__help" data-i18n="reports.open_rma_empty" hidden></p>
+          <div id="rma-open-list"></div>
+        </div>
+      </section>
+      <section id="tab-export" class="tab-section" hidden>
+        <form id="export-form" class="job-form">
+          <h2 data-i18n="export.title"></h2>
+          <p class="field__help" data-i18n="export.help"></p>
+          <div class="field">
+            <label class="field__label" for="export-from" data-i18n="export.from"></label>
+            <input type="date" id="export-from" class="select">
+          </div>
+          <div class="field">
+            <label class="field__label" for="export-to" data-i18n="export.to"></label>
+            <input type="date" id="export-to" class="select">
+          </div>
+          <div class="field">
+            <label class="field__label" for="export-kind" data-i18n="export.kind"></label>
+            <select id="export-kind" class="select">
+              <option value="" data-i18n="export.kind_any"></option>
+              <option value="delivery" data-i18n="expert.job_kind_delivery"></option>
+              <option value="rma" data-i18n="expert.job_kind_rma"></option>
+            </select>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="export-btn" class="btn btn--primary" data-i18n="export.download"></button>
+          </div>
+        </form>
+      </section>
     </div>
   </main>
 
@@ -319,6 +421,10 @@
         if (name === "auftraege" && jobFilter.options.length) {
           refreshJobTemplates();
           refreshJobs();
+        }
+        if (name === "berichte" && repStatusBoxes.length) {
+          loadRepWorkers();
+          refreshOpenRma();
         }
       }
 
@@ -1210,6 +1316,10 @@
       // --- Aufträge -----------------------------------------------------------------------
       var JOB_STATUS_ORDER = ["open", "packing", "packed", "checked", "shipped", "cancelled", "intake", "repair", "outgoing"];
       var jobForm = document.getElementById("job-form");
+      var jobKind = document.getElementById("job-kind");
+      var jobOrderLabel = document.getElementById("job-order-label");
+      var jobCountField = document.getElementById("job-count-field");
+      var jobRmaHelp = document.getElementById("job-rma-help");
       var jobTemplate = document.getElementById("job-template");
       var jobOrder = document.getElementById("job-order");
       var jobCustomer = document.getElementById("job-customer");
@@ -1442,6 +1552,16 @@
         jobEmpty.hidden = jobs.length > 0;
       }
 
+      // An RMA is always one carton and is identified by the RMA number from the other system.
+      function applyJobKind() {
+        var rma = jobKind.value === "rma";
+        jobOrderLabel.textContent = C.t(rma ? "expert.job_rma_order" : "expert.job_order");
+        jobCountField.hidden = rma;
+        jobRmaHelp.hidden = !rma;
+        if (rma) jobCount.value = "1";
+      }
+
+      jobKind.addEventListener("change", applyJobKind);
       jobTemplate.addEventListener("change", loadJobCustomisation);
       jobFilter.addEventListener("change", refreshJobs);
       jobExtraAdd.addEventListener("click", addJobExtra);
@@ -1450,7 +1570,7 @@
         event.preventDefault();
         var templateId = parseInt(jobTemplate.value, 10);
         var order = jobOrder.value.trim();
-        var count = parseInt(jobCount.value, 10);
+        var count = jobKind.value === "rma" ? 1 : parseInt(jobCount.value, 10);
         if (!templateId) {
           C.toast(C.t("expert.job_template_required"));
           return;
@@ -1472,7 +1592,7 @@
         try {
           var created = await expertApi("/api/expert/jobs", {
             body: {
-              kind: "delivery",
+              kind: jobKind.value,
               template_id: templateId,
               order_ref: order,
               customer: jobCustomer.value.trim(),
@@ -1496,6 +1616,424 @@
         jobCreateBtn.disabled = false;
       });
 
+      // --- Berichte ------------------------------------------------------------------------
+      var REP_PAGE = 100;
+      var repForm = document.getElementById("rep-form");
+      var repQ = document.getElementById("rep-q");
+      var repSerial = document.getElementById("rep-serial");
+      var repWorker = document.getElementById("rep-worker");
+      var repKind = document.getElementById("rep-kind");
+      var repStatus = document.getElementById("rep-status");
+      var repFrom = document.getElementById("rep-from");
+      var repTo = document.getElementById("rep-to");
+      var repResetBtn = document.getElementById("rep-reset-btn");
+      var repRows = document.getElementById("rep-rows");
+      var repEmpty = document.getElementById("rep-empty");
+      var repMore = document.getElementById("rep-more");
+      var repDetail = document.getElementById("rep-detail");
+      var rmaOpenRefresh = document.getElementById("rma-open-refresh");
+      var rmaOpenEmpty = document.getElementById("rma-open-empty");
+      var rmaOpenList = document.getElementById("rma-open-list");
+      var repStatusBoxes = [];
+      var repQuery = "";
+      var repLoaded = 0;
+
+      function repEl(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = text;
+        return node;
+      }
+
+      function repCell(row, text) {
+        var td = repEl("td", "", text);
+        row.appendChild(td);
+        return td;
+      }
+
+      function fillRepStatus() {
+        clearNode(repStatus);
+        repStatusBoxes = [];
+        JOB_STATUS_ORDER.forEach(function (status) {
+          var label = repEl("label", "field__checkbox-row rep-status__item");
+          var box = document.createElement("input");
+          box.type = "checkbox";
+          box.value = status;
+          label.appendChild(box);
+          label.appendChild(repEl("span", "", C.t("status." + status)));
+          repStatus.appendChild(label);
+          repStatusBoxes.push(box);
+        });
+      }
+
+      function fillRepWorkerAny() {
+        // Placeholder so the select always has its "all" option even before workers load.
+        clearNode(repWorker);
+        var any = repEl("option", "", C.t("reports.worker_any"));
+        any.value = "";
+        repWorker.appendChild(any);
+      }
+
+      async function loadRepWorkers() {
+        var chosen = repWorker.value;
+        var workers;
+        try {
+          workers = await expertApi("/api/expert/workers");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        fillRepWorkerAny();
+        workers.forEach(function (worker) {
+          var option = repEl("option", "", worker.name);
+          option.value = String(worker.id);
+          repWorker.appendChild(option);
+        });
+        repWorker.value = chosen;
+      }
+
+      // Query string of the search form. No status ticked = every status (the API default hides shipped).
+      function repQueryString() {
+        var params = [];
+        function add(key, value) {
+          if (value) params.push(key + "=" + encodeURIComponent(value));
+        }
+        add("q", repQ.value.trim());
+        add("serial", repSerial.value.trim());
+        add("worker_id", repWorker.value);
+        add("kind", repKind.value);
+        add("from", repFrom.value);
+        add("to", repTo.value);
+        var ticked = repStatusBoxes.filter(function (box) { return box.checked; }).map(function (box) { return box.value; });
+        add("status", (ticked.length ? ticked : JOB_STATUS_ORDER).join(","));
+        return params.join("&");
+      }
+
+      function renderRepRow(job) {
+        var row = repEl("tr", "rep-row");
+        row.tabIndex = 0;
+        row.setAttribute("data-job-id", String(job.id));
+        repCell(row, job.order_ref + (job.customer ? " – " + job.customer : ""));
+        repCell(row, C.t("expert.job_kind_" + job.kind));
+        repCell(row, job.template_name);
+        repCell(row, job.unit_count > 1 ? job.unit_no + "/" + job.unit_count : "–");
+        repCell(row, C.t("status." + job.status));
+        repCell(row, formatTime(job.created_at));
+        repCell(row, job.shipped_at ? formatTime(job.shipped_at) : "–");
+        repCell(row, job.checked_by_name || "–");
+        var dev = repCell(row, "");
+        if (job.deviations > 0) {
+          dev.appendChild(repEl("span", "state-badge state-badge--not_ok", String(job.deviations)));
+        } else {
+          dev.textContent = "0";
+        }
+        function open() { showHistory(job.id); }
+        row.addEventListener("click", open);
+        row.addEventListener("keydown", function (event) {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            open();
+          }
+        });
+        return row;
+      }
+
+      async function runSearch(append) {
+        if (repFrom.value && repTo.value && repFrom.value > repTo.value) {
+          C.toast(C.t("reports.invalid_range"));
+          return;
+        }
+        if (!append) {
+          repQuery = repQueryString();
+          repLoaded = 0;
+          clearNode(repRows);
+        }
+        var jobs;
+        try {
+          jobs = await expertApi("/api/expert/jobs?" + repQuery + "&limit=" + REP_PAGE + "&offset=" + repLoaded);
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        jobs.forEach(function (job) { repRows.appendChild(renderRepRow(job)); });
+        repLoaded += jobs.length;
+        repEmpty.hidden = repLoaded > 0;
+        repMore.hidden = jobs.length < REP_PAGE;
+      }
+
+      function repKV(key, value) {
+        return repEl("span", "rep-kv", C.fmt(C.t(key), value));
+      }
+
+      function qualityText(quality) {
+        return Object.keys(quality || {}).map(function (point) {
+          return point + "=" + C.t(quality[point] === "ok" ? "export.quality_ok" : "export.quality_not_ok");
+        }).join(", ");
+      }
+
+      function photoLink(url) {
+        var link = repEl("a", "rep-photo");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        var img = document.createElement("img");
+        img.src = url;
+        img.alt = C.t("reports.photo");
+        img.className = "rep-thumb";
+        img.loading = "lazy";
+        link.appendChild(img);
+        return link;
+      }
+
+      function renderConfirmation(c, superseded) {
+        var item = repEl("div", "rep-event" + (superseded ? " rep-event--old" : ""));
+        item.appendChild(repEl("span", "state-badge state-badge--" + c.result, C.t("pack.state_" + c.result)));
+        item.appendChild(repEl("strong", "", c.worker_name));
+        item.appendChild(repKV("reports.attempt", { n: c.attempt }));
+        if (superseded) item.appendChild(repEl("span", "tag", C.t("reports.superseded")));
+        item.appendChild(repKV("reports.qty", { n: c.qty }));
+        if (c.serials && c.serials.length) item.appendChild(repKV("reports.serials", { list: c.serials.join(", ") }));
+        var quality = qualityText(c.quality);
+        if (quality) item.appendChild(repKV("reports.quality", { list: quality }));
+        if (c.reason) item.appendChild(repKV("reports.reason", { reason: c.reason }));
+        if (c.photo_url) item.appendChild(photoLink(c.photo_url));
+        item.appendChild(repEl("span", "rep-time", formatTime(c.created_at)));
+        return item;
+      }
+
+      function renderHistoryLine(entry) {
+        var line = entry.line;
+        var box = repEl("div", "rep-line");
+        var head = repEl("div", "rep-line__head");
+        if (line.item_id) head.appendChild(repEl("span", "bom-table__id", line.item_id));
+        head.appendChild(repEl("strong", "", line.label));
+        head.appendChild(repKV("reports.line_target", { n: line.qty }));
+        head.appendChild(repEl("span", "tag", C.t("reports.stage_" + line.stage)));
+        if (line.source === "worker") head.appendChild(repEl("span", "tag tag--warn", C.t("reports.line_worker")));
+        box.appendChild(head);
+        if (line.withheld) {
+          box.appendChild(repEl("p", "field__help", C.fmt(C.t("reports.line_withheld"), { reason: line.withheld_reason })));
+        } else if (!entry.confirmations.length) {
+          box.appendChild(repEl("p", "field__help", C.t("reports.no_confirmation")));
+        }
+        entry.confirmations.forEach(function (c, index) {
+          box.appendChild(renderConfirmation(c, index < entry.confirmations.length - 1));
+        });
+        return box;
+      }
+
+      function auditDetailText(detail) {
+        return Object.keys(detail || {}).map(function (key) {
+          var value = detail[key];
+          return key + ": " + (value !== null && typeof value === "object" ? JSON.stringify(value) : String(value));
+        }).join(" · ");
+      }
+
+      function auditActorName(entry) {
+        if (entry.actor_name) return entry.actor_name;
+        if (entry.actor === "expert") return C.t("reports.actor_expert");
+        if (entry.actor === "system") return C.t("reports.actor_system");
+        return entry.actor;
+      }
+
+      function renderHistory(history) {
+        var job = history.job;
+        clearNode(repDetail);
+        var top = repEl("div", "rep-detail__head");
+        top.appendChild(repEl("h2", "", C.fmt(C.t("reports.detail_title"), { id: job.id, order: job.order_ref })));
+        var close = repEl("button", "btn btn--secondary", C.t("reports.detail_close"));
+        close.type = "button";
+        close.addEventListener("click", function () { repDetail.hidden = true; });
+        top.appendChild(close);
+        repDetail.appendChild(top);
+
+        var meta = repEl("p", "field__help");
+        var parts = [
+          job.customer,
+          C.t("expert.job_kind_" + job.kind),
+          C.t("status." + job.status),
+          C.fmt(C.t("reports.job_meta"), { template: job.template_name, created: formatTime(job.created_at) }),
+        ];
+        if (job.claimed_by_name) parts.push(C.fmt(C.t("reports.job_claimed"), { name: job.claimed_by_name }));
+        if (job.checked_by_name) parts.push(C.t("reports.col_checked") + ": " + job.checked_by_name);
+        if (job.shipped_at) parts.push(C.t("reports.col_shipped") + ": " + formatTime(job.shipped_at));
+        meta.textContent = parts.filter(function (x) { return x; }).join(" · ");
+        repDetail.appendChild(meta);
+
+        repDetail.appendChild(repEl("h3", "", C.t("reports.lines_title")));
+        history.lines.forEach(function (entry) { repDetail.appendChild(renderHistoryLine(entry)); });
+
+        repDetail.appendChild(repEl("h3", "", C.t("reports.checks_title")));
+        if (!history.checks.length) repDetail.appendChild(repEl("p", "field__help", C.t("reports.checks_none")));
+        history.checks.forEach(function (check) {
+          var item = repEl("div", "rep-event");
+          var cls = check.result === "ok" ? "ok" : "not_ok";
+          item.appendChild(repEl("span", "state-badge state-badge--" + cls, C.t("reports.check_" + check.result)));
+          item.appendChild(repEl("strong", "", check.worker_name));
+          item.appendChild(repKV("reports.attempt", { n: check.attempt }));
+          if (check.note) item.appendChild(repKV("reports.reason", { reason: check.note }));
+          if (check.photo_url) item.appendChild(photoLink(check.photo_url));
+          item.appendChild(repEl("span", "rep-time", formatTime(check.created_at)));
+          repDetail.appendChild(item);
+        });
+
+        if (history.repair_notes.length) {
+          repDetail.appendChild(repEl("h3", "", C.t("reports.notes_title")));
+          history.repair_notes.forEach(function (note) {
+            var item = repEl("div", "rep-event");
+            item.appendChild(repEl("span", "state-badge state-badge--note-" + note.action, C.t("rma.act_" + note.action)));
+            item.appendChild(repEl("strong", "", note.label || note.line_label || note.item_id || ""));
+            item.appendChild(repEl("strong", "", note.worker_name));
+            item.appendChild(repKV("reports.qty", { n: note.qty }));
+            if (note.serial) item.appendChild(repKV("reports.serials", { list: note.serial }));
+            if (note.reason) item.appendChild(repKV("reports.reason", { reason: note.reason }));
+            item.appendChild(repEl("span", "rep-time", formatTime(note.created_at)));
+            repDetail.appendChild(item);
+          });
+        }
+
+        var audit = document.createElement("details");
+        audit.className = "rep-audit";
+        audit.appendChild(repEl("summary", "", C.t("reports.audit_title") + " (" + history.audit.length + ")"));
+        if (!history.audit.length) audit.appendChild(repEl("p", "field__help", C.t("reports.audit_empty")));
+        history.audit.forEach(function (entry) {
+          var item = repEl("div", "rep-event");
+          var label = C.t("audit." + entry.action);
+          item.appendChild(repEl("strong", "", label === "audit." + entry.action ? entry.action : label));
+          item.appendChild(repEl("span", "", auditActorName(entry)));
+          var text = auditDetailText(entry.detail);
+          if (text) item.appendChild(repEl("span", "rep-detail-text", text));
+          item.appendChild(repEl("span", "rep-time", formatTime(entry.at)));
+          audit.appendChild(item);
+        });
+        repDetail.appendChild(audit);
+      }
+
+      async function showHistory(jobId) {
+        var history;
+        try {
+          history = await expertApi("/api/expert/jobs/" + jobId + "/history");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        renderHistory(history);
+        repDetail.hidden = false;
+        repDetail.scrollIntoView();
+      }
+
+      function daysOpenText(days) {
+        if (days <= 0) return C.t("reports.days_open_today");
+        if (days === 1) return C.t("reports.days_open_one");
+        return C.fmt(C.t("reports.days_open"), { n: days });
+      }
+
+      function renderOpenRma(entry) {
+        var job = entry.job;
+        var card = repEl("div", "rep-rma");
+        card.setAttribute("data-job-id", String(job.id));
+        var head = repEl("div", "rep-rma__head");
+        head.appendChild(repEl("strong", "", job.order_ref + (job.customer ? " – " + job.customer : "")));
+        head.appendChild(repEl("span", "tag tag--status", C.t("status." + job.status)));
+        head.appendChild(repEl("span", "rep-kv", daysOpenText(job.days_open)));
+        var open = repEl("button", "btn btn--secondary", C.t("reports.detail_open"));
+        open.type = "button";
+        open.addEventListener("click", function () { showHistory(job.id); });
+        head.appendChild(open);
+        card.appendChild(head);
+        if (!entry.lines.length) card.appendChild(repEl("p", "field__help", C.t("reports.rma_none")));
+        entry.lines.forEach(function (line) {
+          var cls = "rep-rma__line" + (line.delta > 0 ? " rep-rma__line--open" : "");
+          var row = repEl("div", cls);
+          row.appendChild(repEl("strong", "", line.label));
+          row.appendChild(repEl("span", "", C.fmt(C.t("reports.rma_line"), {
+            arrived: line.in_qty, kept: line.kept_qty, out: line.out_qty, delta: line.delta,
+          })));
+          card.appendChild(row);
+        });
+        return card;
+      }
+
+      async function refreshOpenRma() {
+        var list;
+        try {
+          list = await expertApi("/api/expert/rma/open");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        clearNode(rmaOpenList);
+        list.forEach(function (entry) { rmaOpenList.appendChild(renderOpenRma(entry)); });
+        rmaOpenEmpty.hidden = list.length > 0;
+      }
+
+      repForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        runSearch(false);
+      });
+      repMore.addEventListener("click", function () { runSearch(true); });
+      repResetBtn.addEventListener("click", function () {
+        repForm.reset();
+        runSearch(false);
+      });
+      rmaOpenRefresh.addEventListener("click", refreshOpenRma);
+
+      async function enterReports() {
+        fillRepStatus();
+        fillRepWorkerAny();
+        await loadRepWorkers();
+        await runSearch(false);
+        await refreshOpenRma();
+      }
+
+      // --- Export --------------------------------------------------------------------------
+      var exportForm = document.getElementById("export-form");
+      var exportFrom = document.getElementById("export-from");
+      var exportTo = document.getElementById("export-to");
+      var exportKind = document.getElementById("export-kind");
+      var exportBtn = document.getElementById("export-btn");
+
+      function isoDate(date) {
+        return date.toISOString().slice(0, 10);
+      }
+
+      // Default range: the last 90 days (the server counts dates in UTC, like the stored times).
+      function fillExportDefaults() {
+        var today = new Date();
+        exportTo.value = isoDate(today);
+        exportFrom.value = isoDate(new Date(today.getTime() - 90 * 24 * 3600 * 1000));
+      }
+
+      exportForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        if (exportFrom.value && exportTo.value && exportFrom.value > exportTo.value) {
+          C.toast(C.t("export.invalid_range"));
+          return;
+        }
+        var params = [];
+        if (exportFrom.value) params.push("from=" + encodeURIComponent(exportFrom.value));
+        if (exportTo.value) params.push("to=" + encodeURIComponent(exportTo.value));
+        if (exportKind.value) params.push("kind=" + encodeURIComponent(exportKind.value));
+        exportBtn.disabled = true;
+        try {
+          // The expert header cannot be sent by a plain link: fetch the file and hand it over as a download.
+          var blob = await expertApi("/api/expert/export.csv?" + params.join("&"), { blob: true });
+          var link = document.createElement("a");
+          var url = URL.createObjectURL(blob);
+          link.href = url;
+          link.download = "galochka-export-" + exportFrom.value + "-" + exportTo.value + ".csv";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+          C.toast(C.t("export.downloaded"));
+        } catch (err) {
+          reportError(err);
+        }
+        exportBtn.disabled = false;
+      });
+
+
       // Called once the password is known to be good (GET /api/expert/settings
       // succeeded); the same call fills the Einstellungen tab, then the Artikel stats load.
       async function enter() {
@@ -1507,6 +2045,8 @@
         fillJobFilter();
         await refreshJobTemplates();
         await refreshJobs();
+        fillExportDefaults();
+        await enterReports();
       }
 
       settingsForm.addEventListener("submit", async function (event) {

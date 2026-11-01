@@ -274,8 +274,14 @@ def test_expert_creates_a_customised_job_and_cancels_and_reopens_it(browser, liv
         page.fill("#password-input", PASSWORD)
         page.click("#login-form button[type=submit]")
         page.click("#tab-btn-auftraege")
-        # RMA cannot be created yet
-        expect(page.locator('#job-kind option[value="rma"]')).to_be_disabled()
+        # RMA is selectable: the count is fixed to one carton and the order label reads "RMA-Nummer"
+        expect(page.locator('#job-kind option[value="rma"]')).to_be_enabled()
+        page.select_option("#job-kind", "rma")
+        expect(page.locator("#job-count-field")).to_be_hidden()
+        expect(page.locator("#job-order-label")).to_have_text("RMA-Nummer")
+        page.select_option("#job-kind", "delivery")
+        expect(page.locator("#job-count-field")).to_be_visible()
+        expect(page.locator("#job-order-label")).to_have_text("Auftragsnummer")
         page.select_option("#job-template", label="Set A")
         expect(page.locator("#job-lines .tpl-line")).to_have_count(2)
         page.fill("#job-order", "C-300")

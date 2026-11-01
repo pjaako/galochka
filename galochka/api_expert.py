@@ -1,5 +1,8 @@
+import csv
+import io
 import json
 import math
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -583,20 +586,61 @@ def create_jobs(body: ExpertJobCreate, request: Request):
 _LISTED_JOB_STATUSES = tuple(s for s in repo.JOB_STATUSES if s not in ("shipped", "cancelled"))
 
 
+def _parse_date(value: str | None) -> date | None:
+    """An ISO date (YYYY-MM-DD) or None for empty; anything else is a 400."""
+    if not value or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=t("error.invalid_request")) from None
+
+
+def _created_window(date_from: date | None, date_to: date | None) -> tuple[str | None, str | None]:
+    """ISO bounds [from, before) for inclusive dates; timestamps are UTC like the stored ones."""
+    start = date_from.isoformat() if date_from else None
+    before = (date_to + timedelta(days=1)).isoformat() if date_to else None
+    return start, before
+
+
 @router.get("/jobs")
 def list_jobs(
     request: Request,
     status: str | None = Query(None),
     kind: str | None = Query(None),
-    limit: int = Query(200, ge=1, le=1000),
+    q: str | None = Query(None, max_length=200),
+    serial: str | None = Query(None, max_length=200),
+    worker_id: int | None = Query(None, ge=1),
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
-    """Jobs for the Aufträge tab: comma-separated `status` (default: everything not shipped/cancelled), newest first."""
+    """Jobs for the Aufträge tab and the reports, newest first.
+
+    Comma-separated `status` (default: everything not shipped/cancelled), `kind`, `q` (order number,
+    customer or set name), `serial`, `worker_id`, `from`/`to` (ISO dates, inclusive, on created_at).
+    """
     statuses = [x.strip() for x in status.split(",") if x.strip()] if status else list(_LISTED_JOB_STATUSES)
     if not statuses or any(x not in repo.JOB_STATUSES for x in statuses) or kind not in (None, "delivery", "rma"):
         raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+    created_from, created_before = _created_window(_parse_date(date_from), _parse_date(date_to))
     with request.app.state.lock:
-        rows = repo.list_jobs(request.app.state.conn, statuses, kind)
-    return [repo.job_to_dict(r) for r in reversed(rows)][:limit]
+        rows = repo.search_jobs(
+            request.app.state.conn, statuses, kind, q=q, serial=serial, worker_id=worker_id,
+            created_from=created_from, created_before=created_before, limit=limit, offset=offset,
+        )
+    return [repo.job_report_dict(r) for r in rows]
+
+
+@router.get("/jobs/{job_id}/history")
+def job_history(job_id: int, request: Request):
+    """All confirmations (superseded ones too), checks, repair notes and audit rows of one job."""
+    with request.app.state.lock:
+        data = repo.job_history(request.app.state.conn, job_id)
+    if data is None:
+        raise _not_found()
+    return data
 
 
 @router.patch("/jobs/{job_id}")
@@ -611,8 +655,120 @@ def update_job_status(job_id: int, body: JobStatusUpdate, request: Request):
         return repo.job_to_dict(repo.get_job(conn, job_id))
 
 
+# --- CSV export -----------------------------------------------------------------------------
+
+# Header of the export, in order (German texts live in strings.de.json).
+_EXPORT_COLUMNS = (
+    "job_id", "kind", "status", "order", "customer", "template", "carton", "stage", "position", "item", "label",
+    "target_qty", "event", "result", "qty", "serials", "quality", "reason", "worker", "attempt", "time", "photo",
+)
+_EXPORT_DEFAULT_DAYS = 90
+
+
+def _csv_text(value) -> str:
+    """A text cell. Values that a spreadsheet would run as a formula get a leading apostrophe."""
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+def _export_row(e: dict) -> list:
+    kind = e["event"]
+    quality = ", ".join(
+        f"{point}={t('export.quality_ok') if answer == 'ok' else t('export.quality_not_ok')}"
+        for point, answer in _json_dict(e.get("quality")).items()
+    )
+    row = {
+        "job_id": e["job_id"],
+        "kind": t("expert.job_kind_" + e["job_kind"]),
+        "status": t("status." + e["job_status"]),
+        "order": e["order_ref"],
+        "customer": e["customer"],
+        "template": e["template_name"],
+        "carton": f"{e['unit_no']}/{e['unit_count']}",
+        "event": t("export.event_" + kind),
+        "worker": e["worker_name"],
+        "attempt": e["attempt"] if kind != "note" else "",
+        "time": e["created_at"],
+        "stage": "", "position": "", "item": "", "label": "", "target_qty": "", "result": "", "qty": "",
+        "serials": "", "quality": "", "reason": "", "photo": "",
+    }
+    if kind == "confirmation":
+        row.update(
+            stage=t("export.stage_" + e["line_stage"]), position=e["line_position"], item=e["line_item_id"],
+            label=e["line_label"], target_qty=e["line_qty"], result=t("export.result_" + e["result"]),
+            qty=e["qty"], serials=", ".join(str(x) for x in _json_list(e["serials"])), quality=quality,
+            reason=e["reason"], photo=f"/photos/{e['photo_path']}" if e["photo_path"] else "",
+        )
+    elif kind == "check":
+        row.update(
+            result=t("export.check_" + e["result"]), reason=e["note"],
+            photo=f"/photos/{e['photo_path']}" if e["photo_path"] else "",
+        )
+    else:
+        row.update(
+            stage=t("export.stage_repair"), position=e["line_position"] if e["job_line_id"] else "",
+            item=e["item_id"] or e["line_item_id"] or "", label=e["label"] or e["line_label"] or "",
+            target_qty=e["line_qty"] if e["job_line_id"] else "", result=t("rma.act_" + e["action"]), qty=e["qty"],
+            serials=e["serial"], reason=e["reason"],
+        )
+    return [row[name] if isinstance(row[name], int) else _csv_text(row[name]) for name in _EXPORT_COLUMNS]
+
+
+def _json_list(value) -> list:
+    try:
+        data = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _json_dict(value) -> dict:
+    try:
+        data = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@router.get("/export.csv")
+def export_csv(
+    request: Request,
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
+    kind: str | None = Query(None),
+):
+    """The audit trail as a CSV for German Excel: one row per confirmation, second check and repair note.
+
+    UTF-8 with BOM, `;` separator, CRLF. `from`/`to` are inclusive ISO dates on the event time (UTC);
+    the default is the last 90 days up to today.
+    """
+    if kind not in (None, "delivery", "rma"):
+        raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+    end = _parse_date(date_to) or datetime.now(timezone.utc).date()
+    start = _parse_date(date_from) or end - timedelta(days=_EXPORT_DEFAULT_DAYS)
+    if start > end:
+        raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+    created_from, created_before = _created_window(start, end)
+    with request.app.state.lock:
+        events = repo.export_events(request.app.state.conn, created_from, created_before, kind)
+    buf = io.StringIO()
+    writer = csv.writer(buf, dialect="excel", delimiter=";", lineterminator="\r\n")
+    writer.writerow([t("export.col_" + name) for name in _EXPORT_COLUMNS])
+    for event in events:
+        writer.writerow(_export_row(event))
+    filename = f"galochka-export-{start.isoformat()}-{end.isoformat()}.csv"
+    return Response(
+        content=("\ufeff" + buf.getvalue()).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/rma/open")
 def open_rma(request: Request):
     """RMAs not shipped or cancelled with the in/kept/out balance per intake line (delta > 0 = still in the house)."""
+    now = _now()
     with request.app.state.lock:
-        return repo.open_rma_balances(request.app.state.conn)
+        return repo.open_rma_balances(request.app.state.conn, now)

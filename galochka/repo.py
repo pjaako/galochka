@@ -626,14 +626,31 @@ _DONE_SQL = (
     "EXISTS (SELECT 1 FROM confirmations c WHERE c.job_line_id = l.id"
     f" AND (l.stage = 'intake' OR c.attempt = {_ATTEMPT_SQL}))"
 )
-_JOB_SELECT = f"""
+
+
+def _job_select(extra: str = "") -> str:
+    return f"""
     SELECT j.*, w.name AS claimed_by_name, {_STAGE_SQL} AS stage, {_ATTEMPT_SQL} AS attempt,
            (SELECT COUNT(*) FROM job_lines l
              WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL} AND l.withheld = 0) AS lines_total,
            (SELECT COUNT(*) FROM job_lines l
              WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL} AND l.withheld = 0 AND {_DONE_SQL}) AS lines_done
+           {extra}
     FROM jobs j LEFT JOIN workers w ON w.id = j.claimed_by
 """
+
+
+_JOB_SELECT = _job_select()
+# Report columns: when it shipped, how many lines of the current stage deviate (latest result not ok, or a
+# line a worker added), and who approved the second check (only while checked or shipped, like the label).
+_REPORT_SELECT = _job_select(f""", CASE WHEN j.status = 'shipped' THEN j.stage_changed_at END AS shipped_at,
+           (SELECT COUNT(*) FROM job_lines l
+             WHERE l.job_id = j.id AND l.stage = {_STAGE_SQL}
+               AND (l.source = 'worker' OR COALESCE((SELECT c.result FROM confirmations c
+                    WHERE c.job_line_id = l.id ORDER BY c.id DESC LIMIT 1), 'ok') <> 'ok')) AS deviations,
+           CASE WHEN j.status IN ('checked', 'shipped') THEN
+             (SELECT cw.name FROM checks k JOIN workers cw ON cw.id = k.worker_id
+               WHERE k.job_id = j.id AND k.result = 'ok' ORDER BY k.id DESC LIMIT 1) END AS checked_by_name""")
 
 
 def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
@@ -681,6 +698,100 @@ def job_to_dict(row) -> dict:
         "lines_total": row["lines_total"],
         "lines_done": row["lines_done"],
     }
+
+
+def _casefold(value):
+    return value.casefold() if isinstance(value, str) else value
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_jobs(
+    conn: sqlite3.Connection,
+    statuses,
+    kind: str | None = None,
+    q: str | None = None,
+    serial: str | None = None,
+    worker_id: int | None = None,
+    created_from: str | None = None,
+    created_before: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """Jobs for the reports, newest first, with shipped_at, deviations and checked_by_name.
+
+    q: case-insensitive substring of order_ref, customer or template_name. serial: exact (case-insensitive)
+    match of one serial of a confirmation or the serial of a repair note. worker_id: the worker confirmed a
+    line, checked, wrote a repair note, created or claimed the job. created_from (inclusive) and
+    created_before (exclusive) are ISO strings compared with jobs.created_at.
+    """
+    conn.create_function("casefold", 1, _casefold, deterministic=True)
+    statuses = list(statuses)
+    where = [f"j.status IN ({','.join('?' * len(statuses))})"]
+    args: list = list(statuses)
+    if kind is not None:
+        where.append("j.kind = ?")
+        args.append(kind)
+    q = (q or "").strip()
+    if q:
+        pattern = "%" + _like_escape(q.casefold()) + "%"
+        where.append(
+            "(casefold(j.order_ref) LIKE ? ESCAPE '\\' OR casefold(j.customer) LIKE ? ESCAPE '\\'"
+            " OR casefold(j.template_name) LIKE ? ESCAPE '\\')"
+        )
+        args += [pattern] * 3
+    serial = (serial or "").strip()
+    if serial:
+        where.append(
+            "(EXISTS (SELECT 1 FROM confirmations c JOIN job_lines l ON l.id = c.job_line_id"
+            "         WHERE l.job_id = j.id AND json_valid(c.serials)"
+            "           AND EXISTS (SELECT 1 FROM json_each(c.serials) s WHERE casefold(s.value) = ?))"
+            " OR EXISTS (SELECT 1 FROM repair_notes n WHERE n.job_id = j.id AND casefold(n.serial) = ?))"
+        )
+        args += [serial.casefold()] * 2
+    if worker_id is not None:
+        where.append(
+            "(j.claimed_by = ? OR j.created_by = ?"
+            " OR EXISTS (SELECT 1 FROM confirmations c JOIN job_lines l ON l.id = c.job_line_id"
+            "            WHERE l.job_id = j.id AND c.worker_id = ?)"
+            " OR EXISTS (SELECT 1 FROM checks k WHERE k.job_id = j.id AND k.worker_id = ?)"
+            " OR EXISTS (SELECT 1 FROM repair_notes n WHERE n.job_id = j.id AND n.worker_id = ?))"
+        )
+        args += [worker_id, f"worker:{worker_id}", worker_id, worker_id, worker_id]
+    if created_from:
+        where.append("j.created_at >= ?")
+        args.append(created_from)
+    if created_before:
+        where.append("j.created_at < ?")
+        args.append(created_before)
+    args += [limit, offset]
+    return conn.execute(
+        _REPORT_SELECT + " WHERE " + " AND ".join(where) + " ORDER BY j.id DESC LIMIT ? OFFSET ?", args
+    ).fetchall()
+
+
+def job_report_dict(row) -> dict:
+    """job_to_dict plus the report columns (row from search_jobs / get_report_job)."""
+    data = job_to_dict(row)
+    data["shipped_at"] = row["shipped_at"]
+    data["deviations"] = row["deviations"]
+    data["checked_by_name"] = row["checked_by_name"]
+    return data
+
+
+def get_report_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(_REPORT_SELECT + " WHERE j.id = ?", (job_id,)).fetchone()
+
+
+def days_open(created_at: str, now: str) -> int:
+    """Whole days between two ISO timestamps (0 when unparsable or in the future)."""
+    try:
+        delta = datetime.fromisoformat(now) - datetime.fromisoformat(created_at)
+    except ValueError:
+        return 0
+    return max(0, delta.days)
 
 
 def _clean_reason(value) -> str:
@@ -948,14 +1059,12 @@ def line_to_dict(row, latest: dict | None = None) -> dict:
     }
 
 
-def get_confirmation(conn: sqlite3.Connection, confirmation_id: int) -> dict | None:
-    row = conn.execute(
-        "SELECT c.*, w.name AS worker_name FROM confirmations c JOIN workers w ON w.id = c.worker_id"
-        " WHERE c.id = ?",
-        (confirmation_id,),
-    ).fetchone()
-    if row is None:
-        return None
+_CONFIRMATION_SELECT = (
+    "SELECT c.*, w.name AS worker_name FROM confirmations c JOIN workers w ON w.id = c.worker_id"
+)
+
+
+def _confirmation_dict(row) -> dict:
     return {
         "id": row["id"],
         "line_id": row["job_line_id"],
@@ -970,6 +1079,11 @@ def get_confirmation(conn: sqlite3.Connection, confirmation_id: int) -> dict | N
         "photo_url": _photo_url(row["photo_path"]),
         "created_at": row["created_at"],
     }
+
+
+def get_confirmation(conn: sqlite3.Connection, confirmation_id: int) -> dict | None:
+    row = conn.execute(_CONFIRMATION_SELECT + " WHERE c.id = ?", (confirmation_id,)).fetchone()
+    return None if row is None else _confirmation_dict(row)
 
 
 def current_attempt(conn: sqlite3.Connection, job_id: int) -> int:
@@ -1710,9 +1824,121 @@ def rma_balance(conn: sqlite3.Connection, job_id: int) -> list[dict]:
     ]
 
 
-def open_rma_balances(conn: sqlite3.Connection) -> list[dict]:
-    """[{job: job dict, lines: rma_balance}] of every rma not shipped or cancelled, oldest first."""
-    return [
-        {"job": job_to_dict(job), "lines": rma_balance(conn, job["id"])}
-        for job in list_jobs(conn, OPEN_RMA_STATUSES, kind="rma")
+def open_rma_balances(conn: sqlite3.Connection, now: str | None = None) -> list[dict]:
+    """[{job: job dict, lines: rma_balance}] of every rma not shipped or cancelled, oldest first.
+
+    With `now`, each job also carries days_open (whole days since it was created).
+    """
+    out = []
+    for job in list_jobs(conn, OPEN_RMA_STATUSES, kind="rma"):
+        data = job_to_dict(job)
+        if now is not None:
+            data["days_open"] = days_open(job["created_at"], now)
+        out.append({"job": data, "lines": rma_balance(conn, job["id"])})
+    return out
+
+
+# --- reports: history and export ------------------------------------------------------------
+
+
+def _audit_actor_names(conn: sqlite3.Connection, actors) -> dict[str, str]:
+    """{'worker:<id>': name} for the worker actors in `actors` (unknown or non-worker actors are left out)."""
+    ids = {a.split(":", 1)[1] for a in actors if a.startswith("worker:") and a.split(":", 1)[1].isdigit()}
+    if not ids:
+        return {}
+    rows = conn.execute(
+        f"SELECT id, name FROM workers WHERE id IN ({','.join('?' * len(ids))})", [int(i) for i in ids]
+    ).fetchall()
+    return {f"worker:{r['id']}": r["name"] for r in rows}
+
+
+def job_history(conn: sqlite3.Connection, job_id: int) -> dict | None:
+    """Everything recorded about one job, or None for an unknown job.
+
+    {job, lines: [{line, confirmations: [all, oldest first]}] (all stages, intake before outgoing),
+     repair_notes (oldest first), checks (oldest first), audit: [{at, actor, actor_name, action, detail}]}.
+    Superseded confirmations (earlier attempts, corrections) are included: the table is append-only.
+    """
+    job = get_report_job(conn, job_id)
+    if job is None:
+        return None
+    by_line: dict[int, list[dict]] = {}
+    for row in conn.execute(
+        _CONFIRMATION_SELECT + " JOIN job_lines l ON l.id = c.job_line_id WHERE l.job_id = ? ORDER BY c.id",
+        (job_id,),
+    ).fetchall():
+        by_line.setdefault(row["job_line_id"], []).append(_confirmation_dict(row))
+    lines = [
+        {"line": line_to_dict(row, latest), "confirmations": by_line.get(row["id"], [])}
+        for row, latest in get_job_lines(conn, job_id)
     ]
+    audit_rows = conn.execute(
+        "SELECT * FROM audit WHERE entity = 'job' AND entity_id = ? ORDER BY id", (str(job_id),)
+    ).fetchall()
+    names = _audit_actor_names(conn, {r["actor"] for r in audit_rows})
+    return {
+        "job": job_report_dict(job),
+        "lines": lines,
+        "repair_notes": list_repair_notes(conn, job_id),
+        "checks": list(reversed(list_checks(conn, job_id))),
+        "audit": [
+            {
+                "at": r["at"],
+                "actor": r["actor"],
+                "actor_name": names.get(r["actor"]),
+                "action": r["action"],
+                "detail": _load_json(r["detail"], {}),
+            }
+            for r in audit_rows
+        ],
+    }
+
+
+_EXPORT_JOB_COLUMNS = (
+    "j.id AS job_id, j.kind AS job_kind, j.status AS job_status, j.order_ref, j.customer, j.template_name,"
+    " j.unit_no, j.unit_count"
+)
+
+
+def export_events(
+    conn: sqlite3.Connection, created_from: str, created_before: str, kind: str | None = None
+) -> list[dict]:
+    """Every confirmation, second check and repair note with created_at in [created_from, created_before).
+
+    Oldest first. Each dict has `event` ('confirmation' | 'check' | 'note'), the job columns (job_id,
+    job_kind, job_status, order_ref, customer, template_name, unit_no, unit_count) and the event row
+    (confirmation: line stage/position/item_id/label/line_qty, worker_name, attempt, result, qty, serials,
+    quality, reason, photo_path; check: result, note, attempt; note: action, label, qty, serial, reason).
+    """
+    kind_sql, kind_args = (" AND j.kind = ?", [kind]) if kind else ("", [])
+    window = " AND {t}.created_at >= ? AND {t}.created_at < ?"
+    args = [created_from, created_before] + kind_args
+    events: list[dict] = []
+    for row in conn.execute(
+        f"SELECT c.*, w.name AS worker_name, l.stage AS line_stage, l.position AS line_position,"
+        f" l.item_id AS line_item_id, l.label AS line_label, l.qty AS line_qty, {_EXPORT_JOB_COLUMNS}"
+        " FROM confirmations c JOIN job_lines l ON l.id = c.job_line_id JOIN jobs j ON j.id = l.job_id"
+        " JOIN workers w ON w.id = c.worker_id WHERE 1 = 1" + window.format(t="c") + kind_sql,
+        args,
+    ):
+        events.append({"event": "confirmation", **dict(row)})
+    for row in conn.execute(
+        f"SELECT k.*, w.name AS worker_name,"
+        " 1 + (SELECT COUNT(*) FROM checks r WHERE r.job_id = k.job_id AND r.result = 'rejected' AND r.id < k.id)"
+        f" AS attempt, {_EXPORT_JOB_COLUMNS}"
+        " FROM checks k JOIN jobs j ON j.id = k.job_id JOIN workers w ON w.id = k.worker_id"
+        " WHERE 1 = 1" + window.format(t="k") + kind_sql,
+        args,
+    ):
+        events.append({"event": "check", **dict(row)})
+    for row in conn.execute(
+        f"SELECT n.*, w.name AS worker_name, l.stage AS line_stage, l.position AS line_position,"
+        f" l.item_id AS line_item_id, l.label AS line_label, l.qty AS line_qty, {_EXPORT_JOB_COLUMNS}"
+        " FROM repair_notes n JOIN jobs j ON j.id = n.job_id JOIN workers w ON w.id = n.worker_id"
+        " LEFT JOIN job_lines l ON l.id = n.job_line_id WHERE 1 = 1" + window.format(t="n") + kind_sql,
+        args,
+    ):
+        events.append({"event": "note", **dict(row)})
+    rank = {"confirmation": 0, "check": 1, "note": 2}
+    events.sort(key=lambda e: (e["created_at"], rank[e["event"]], e["id"]))
+    return events
