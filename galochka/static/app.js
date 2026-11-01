@@ -23,7 +23,8 @@
   // A 401 on a worker path (anything but /api/expert and /api/login) means the
   // session is missing or expired: the browser is sent to /anmelden?next=<page>
   // and the error is still thrown so the caller stops. Pass noRedirect: true to
-  // handle a 401 yourself (the print page does, to retry as expert). Pass
+  // handle a 401 yourself (the print page does, to retry as expert). The thrown
+  // error also carries the parsed JSON body as `data` (e.g. open_line_ids). Pass
   // blob: true to get the body of a successful answer as a Blob (badge SVG).
   async function api(path, opts) {
     opts = opts || {};
@@ -66,7 +67,7 @@
           "/anmelden?next=" + encodeURIComponent(window.location.pathname + window.location.search);
       }
       var detail = data && typeof data.detail === "string" ? data.detail : t("error.generic");
-      throw { status: resp.status, detail: detail };
+      throw { status: resp.status, detail: detail, data: data };
     }
     return data;
   }

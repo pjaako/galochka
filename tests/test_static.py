@@ -110,9 +110,13 @@ def test_worker_pages_have_nav_skeleton(client):
 
 
 def test_stub_pages_check_the_session_and_redirect_to_login(client):
-    for path in ("/auftraege", "/packen/1", "/pruefen/1", "/rma/1"):
+    for path in ("/pruefen/1", "/rma/1"):
         html = client.get(path).text
         assert 'data-i18n="common.not_available"' in html
+        assert "C.loadMe()" in html and "C.goLogin()" in html, path
+    for path in ("/auftraege", "/packen/1"):
+        html = client.get(path).text
+        assert 'data-i18n="common.not_available"' not in html, path
         assert "C.loadMe()" in html and "C.goLogin()" in html, path
     # anmelden shows the current user but never redirects; the print pages do their own auth
     assert "C.loadMe()" in client.get("/anmelden").text
@@ -303,3 +307,83 @@ def test_template_and_bom_strings_exist_in_german():
     html = (STATIC_DIR / "experte.html").read_text(encoding="utf-8")
     for key in set(re.findall(r'"(expert\.(?:tpl|bom)_[\w]+)"', html)):
         assert key in strings, key
+
+
+def test_auftraege_page_markup(client):
+    html = client.get("/auftraege").text
+    for element_id in ("new-job-btn", "rma-btn", "new-job-form", "new-template", "new-order", "new-customer",
+                       "filter-all", "filter-mine", "job-list"):
+        assert f'id="{element_id}"' in html, element_id
+    # RMA creation arrives with version 2: the button is disabled and carries the hint
+    assert re.search(r'<button[^>]*id="rma-btn"[^>]*\bdisabled\b', html)
+    assert 'data-i18n="jobs.rma_hint"' in html
+    for key in ("jobs.new", "jobs.rma", "jobs.filter_all", "jobs.filter_mine", "jobs.create"):
+        assert f'data-i18n="{key}"' in html, key
+    assert "/api/jobs?status=" in html and "/api/templates" in html and "/api/jobs/" in html
+    assert '"/packen/"' in html and '"/pruefen/"' in html and '"/rma/"' in html
+    assert "/ship" in html and "/claim" in html
+    assert '"status." + job.status' in html
+
+
+def test_packen_page_markup(client):
+    html = client.get("/packen/7").text
+    for element_id in ("pack-head", "pack-progress", "pack-bar-fill", "pack-strip", "pack-body", "pack-actions"):
+        assert f'id="{element_id}"' in html, element_id
+    assert 'class="progress-bar"' in html
+    # camera only through a file input (plain HTTP), photo downscaled before upload
+    assert 'accept = "image/*"' in html and 'setAttribute("capture", "environment")' in html
+    assert "C.downscaleImage(draft.photo, 1600, 0.9)" in html
+    assert "/api/lines/" in html and "/confirm" in html and "/finish" in html and "/claim" in html
+    assert "aria-pressed" in html and "touchstart" in html and "touchend" in html
+    assert "Math.abs(dx) < 60" in html
+    for key in ("pack.action_ok", "pack.action_missing", "pack.action_notok", "pack.finish", "pack.no_reference",
+                "pack.done_second_check", "pack.done_released", "pack.logout_done", "error.quality_incomplete",
+                "pack.extra"):
+        assert key in html, key
+    assert "onerror" in html and "photo-tile" in html
+    assert 'autocapitalize' in html
+
+
+def test_packen_and_job_strings_exist_in_german():
+    strings = _strings()
+    for state in ("ok", "missing", "not_ok", "open", "withheld"):
+        assert f"pack.state_{state}" in strings
+    for status in ("open", "packing", "packed", "checked", "shipped", "cancelled", "intake", "repair", "outgoing"):
+        assert f"status.{status}" in strings
+    assert strings["pack.no_reference"] == "Foto in Cassandra erfassen"
+    assert strings["pack.done_second_check"].startswith("Gepackt")
+    # keys passed around as plain string literals in the job pages exist
+    for name in ("packen.html", "auftraege.html", "experte.html"):
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        keys = set(re.findall(r'"((?:pack|jobs)\.[\w]+)"', text)) | set(re.findall(r'"(expert\.job[s]?_[\w]+)"', text))
+        for key in keys:
+            if not key.endswith("_"):  # "pack.state_" is a prefix completed at runtime (checked above)
+                assert key in strings, (name, key)
+
+
+def test_experte_auftraege_tab_markup(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-auftraege".*?</section>', html, re.S).group(0)
+    assert "hidden" in section.split(">", 1)[0]
+    for element_id in ("job-form", "job-kind", "job-template", "job-order", "job-customer", "job-count", "job-note",
+                       "job-lines", "job-extras", "job-extra-add", "job-create-btn", "job-filter", "job-rows"):
+        assert f'id="{element_id}"' in section, element_id
+    # rma is not creatable yet
+    assert re.search(r'<option value="rma"[^>]*\bdisabled\b', section)
+    for key in ("expert.job_cancel", "expert.job_reopen", "expert.job_label", "expert.job_omit"):
+        assert key in html, key
+    assert "/api/expert/jobs" in html and "/api/expert/templates/" in html and "/druck/etikett/" in html
+    assert '"cancelled"' in html and "withheld: true" in html
+
+
+def test_pack_css_has_the_packen_pieces():
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    for selector in (".q-btn", ".q-pair", ".serial-input", ".pack-actions", ".line-strip", ".line-dot", ".state-badge",
+                     ".sum-row", ".progress-bar", ".btn--working"):
+        assert selector in css, selector
+    assert "env(safe-area-inset-bottom)" in css and "position: sticky" in css
+
+
+def test_app_js_api_errors_carry_the_body():
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "data: data" in js

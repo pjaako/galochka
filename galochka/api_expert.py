@@ -580,6 +580,25 @@ def create_jobs(body: ExpertJobCreate, request: Request):
         return [repo.job_to_dict(repo.get_job(conn, job_id)) for job_id in ids]
 
 
+_LISTED_JOB_STATUSES = tuple(s for s in repo.JOB_STATUSES if s not in ("shipped", "cancelled"))
+
+
+@router.get("/jobs")
+def list_jobs(
+    request: Request,
+    status: str | None = Query(None),
+    kind: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Jobs for the Aufträge tab: comma-separated `status` (default: everything not shipped/cancelled), newest first."""
+    statuses = [x.strip() for x in status.split(",") if x.strip()] if status else list(_LISTED_JOB_STATUSES)
+    if not statuses or any(x not in repo.JOB_STATUSES for x in statuses) or kind not in (None, "delivery", "rma"):
+        raise HTTPException(status_code=400, detail=t("error.invalid_request"))
+    with request.app.state.lock:
+        rows = repo.list_jobs(request.app.state.conn, statuses, kind)
+    return [repo.job_to_dict(r) for r in reversed(rows)][:limit]
+
+
 @router.patch("/jobs/{job_id}")
 def update_job_status(job_id: int, body: JobStatusUpdate, request: Request):
     conn = request.app.state.conn

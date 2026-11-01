@@ -144,7 +144,75 @@
           </div>
         </form>
       </section>
-      <section id="tab-auftraege" class="tab-section" hidden></section>
+      <section id="tab-auftraege" class="tab-section" hidden>
+        <form id="job-form" class="job-form">
+          <h2 data-i18n="expert.jobs_title"></h2>
+          <div class="field">
+            <label class="field__label" for="job-kind" data-i18n="expert.job_kind"></label>
+            <select id="job-kind" class="select">
+              <option value="delivery" data-i18n="expert.job_kind_delivery"></option>
+              <option value="rma" data-i18n="expert.job_kind_rma" disabled></option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="job-template" data-i18n="expert.job_template"></label>
+            <select id="job-template" class="select"></select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="job-order" data-i18n="expert.job_order"></label>
+            <input type="text" id="job-order" class="input-id" maxlength="40" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="field__label" for="job-customer" data-i18n="expert.job_customer"></label>
+            <input type="text" id="job-customer" class="input-id" maxlength="80" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="field__label" for="job-count" data-i18n="expert.job_count"></label>
+            <input type="number" id="job-count" class="input-id" min="1" max="20" value="1" inputmode="numeric">
+          </div>
+          <div class="field">
+            <label class="field__label" for="job-note" data-i18n="expert.job_note"></label>
+            <input type="text" id="job-note" class="input-id" maxlength="500" autocomplete="off">
+          </div>
+          <div id="job-custom" class="settings-section" hidden>
+            <h2 data-i18n="expert.job_custom_title"></h2>
+            <p class="field__help" data-i18n="expert.job_custom_help"></p>
+            <div id="job-lines"></div>
+            <div id="job-extras"></div>
+            <div class="form-actions">
+              <button type="button" id="job-extra-add" class="btn btn--secondary" data-i18n="expert.job_extra_add"></button>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="job-create-btn" class="btn btn--primary" data-i18n="expert.job_create"></button>
+          </div>
+        </form>
+
+        <div class="settings-section">
+          <h2 data-i18n="expert.jobs_list"></h2>
+          <div class="field">
+            <label class="field__label" for="job-filter" data-i18n="expert.jobs_filter"></label>
+            <select id="job-filter" class="select"></select>
+          </div>
+          <div class="bom-lines">
+            <table class="bom-table job-table" id="job-table">
+              <thead>
+                <tr>
+                  <th data-i18n="expert.jobs_col_order"></th>
+                  <th data-i18n="expert.jobs_col_template"></th>
+                  <th data-i18n="expert.jobs_col_carton"></th>
+                  <th data-i18n="expert.jobs_col_status"></th>
+                  <th data-i18n="expert.jobs_col_claimed"></th>
+                  <th data-i18n="expert.jobs_col_progress"></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="job-rows"></tbody>
+            </table>
+          </div>
+          <p id="job-empty" class="field__help" data-i18n="expert.jobs_empty" hidden></p>
+        </div>
+      </section>
       <section id="tab-mitarbeiter" class="tab-section" hidden>
         <form id="worker-form">
           <h2 data-i18n="expert.workers_title"></h2>
@@ -247,6 +315,11 @@
         tabButtons.forEach(function (btn) {
           btn.setAttribute("aria-pressed", String(btn.getAttribute("data-tab") === name));
         });
+        // Templates and jobs change elsewhere (Vorlagen tab, workers on the floor): reload when the tab opens.
+        if (name === "auftraege" && jobFilter.options.length) {
+          refreshJobTemplates();
+          refreshJobs();
+        }
       }
 
       var itemsActive = document.getElementById("items-active");
@@ -1134,6 +1207,295 @@
         bomImportBtn.disabled = false;
       });
 
+      // --- Aufträge -----------------------------------------------------------------------
+      var JOB_STATUS_ORDER = ["open", "packing", "packed", "checked", "shipped", "cancelled", "intake", "repair", "outgoing"];
+      var jobForm = document.getElementById("job-form");
+      var jobTemplate = document.getElementById("job-template");
+      var jobOrder = document.getElementById("job-order");
+      var jobCustomer = document.getElementById("job-customer");
+      var jobCount = document.getElementById("job-count");
+      var jobNote = document.getElementById("job-note");
+      var jobCustom = document.getElementById("job-custom");
+      var jobLines = document.getElementById("job-lines");
+      var jobExtras = document.getElementById("job-extras");
+      var jobExtraAdd = document.getElementById("job-extra-add");
+      var jobCreateBtn = document.getElementById("job-create-btn");
+      var jobFilter = document.getElementById("job-filter");
+      var jobRows = document.getElementById("job-rows");
+      var jobEmpty = document.getElementById("job-empty");
+      var jobLineControls = []; // [{line, omit, reason}] for the loaded template
+      var jobExtraControls = []; // [{wrap, picker, label, qty, reason}]
+
+      function fillJobFilter() {
+        clearNode(jobFilter);
+        var all = document.createElement("option");
+        all.value = "";
+        all.textContent = C.t("expert.jobs_filter_active");
+        jobFilter.appendChild(all);
+        JOB_STATUS_ORDER.forEach(function (status) {
+          var option = document.createElement("option");
+          option.value = status;
+          option.textContent = C.t("status." + status);
+          jobFilter.appendChild(option);
+        });
+      }
+
+      async function refreshJobTemplates() {
+        var chosen = jobTemplate.value;
+        var templates;
+        try {
+          templates = await expertApi("/api/expert/templates");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        clearNode(jobTemplate);
+        var blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = C.t("expert.job_template_choose");
+        jobTemplate.appendChild(blank);
+        templates.forEach(function (tpl) {
+          var option = document.createElement("option");
+          option.value = String(tpl.id);
+          option.textContent = tpl.name;
+          jobTemplate.appendChild(option);
+        });
+        jobTemplate.value = chosen;
+        if (jobTemplate.value !== chosen) await loadJobCustomisation();
+      }
+
+      function jobLabeledInput(placeholderKey, type) {
+        var input = document.createElement("input");
+        input.type = type || "text";
+        input.className = "input-id";
+        input.setAttribute("autocomplete", "off");
+        input.setAttribute("placeholder", C.t(placeholderKey));
+        return input;
+      }
+
+      // Lines of the chosen template: a "weglassen" checkbox and a reason field each.
+      async function loadJobCustomisation() {
+        clearNode(jobLines);
+        clearNode(jobExtras);
+        jobLineControls = [];
+        jobExtraControls = [];
+        var templateId = parseInt(jobTemplate.value, 10);
+        jobCustom.hidden = !templateId;
+        if (!templateId) return;
+        var template;
+        try {
+          template = await expertApi("/api/expert/templates/" + templateId);
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        template.lines.forEach(function (line) {
+          var row = document.createElement("div");
+          row.className = "tpl-line";
+          row.setAttribute("data-template-line", String(line.id));
+          var head = document.createElement("label");
+          head.className = "field__checkbox-row";
+          var omit = document.createElement("input");
+          omit.type = "checkbox";
+          var text = document.createElement("span");
+          text.textContent = line.qty + " × " + line.label + " – " + C.t("expert.job_omit");
+          head.appendChild(omit);
+          head.appendChild(text);
+          var reason = jobLabeledInput("expert.job_omit_reason");
+          reason.maxLength = 200;
+          reason.hidden = true;
+          omit.addEventListener("change", function () { reason.hidden = !omit.checked; });
+          row.appendChild(head);
+          row.appendChild(reason);
+          jobLines.appendChild(row);
+          jobLineControls.push({ line: line, omit: omit, reason: reason });
+        });
+      }
+
+      function addJobExtra() {
+        var wrap = document.createElement("div");
+        wrap.className = "tpl-line";
+        var picker = makeItemPicker(null);
+        var label = jobLabeledInput("expert.job_extra_label");
+        label.maxLength = 120;
+        var qty = jobLabeledInput("expert.job_extra_qty", "number");
+        qty.min = "1";
+        qty.max = "999";
+        qty.value = "1";
+        var reason = jobLabeledInput("expert.job_extra_reason");
+        reason.maxLength = 200;
+        var remove = workerButton("expert.job_extra_remove", function () {
+          jobExtras.removeChild(wrap);
+          jobExtraControls = jobExtraControls.filter(function (c) { return c.wrap !== wrap; });
+        });
+        [picker.el, label, qty, reason, remove].forEach(function (node) {
+          node.style.marginTop = "8px";
+          wrap.appendChild(node);
+        });
+        jobExtras.appendChild(wrap);
+        jobExtraControls.push({ wrap: wrap, picker: picker, label: label, qty: qty, reason: reason });
+      }
+
+      // Returns {customisations} or {error: text}.
+      function collectCustomisations() {
+        var out = [];
+        for (var i = 0; i < jobLineControls.length; i += 1) {
+          var c = jobLineControls[i];
+          if (!c.omit.checked) continue;
+          var why = c.reason.value.trim();
+          if (why.length < 3) return { error: C.t("expert.job_reason_required") };
+          out.push({ template_line_id: c.line.id, withheld: true, reason: why });
+        }
+        for (var j = 0; j < jobExtraControls.length; j += 1) {
+          var x = jobExtraControls[j];
+          if (!x.picker.isValid()) return { error: C.t("expert.tpl_item_pick") };
+          var itemId = x.picker.getId();
+          var label = x.label.value.trim();
+          var qty = parseInt(x.qty.value, 10);
+          var reason = x.reason.value.trim();
+          if ((!label && !itemId) || !(qty >= 1 && qty <= 999)) return { error: C.t("expert.job_extra_invalid") };
+          if (reason.length < 3) return { error: C.t("expert.job_reason_required") };
+          var extra = { qty: qty, reason: reason };
+          if (itemId) extra.item_id = itemId;
+          if (label) extra.label = label;
+          out.push(extra);
+        }
+        return { customisations: out };
+      }
+
+      function jobCell(row, text) {
+        var td = document.createElement("td");
+        td.textContent = text;
+        row.appendChild(td);
+        return td;
+      }
+
+      // Status the expert can send a finished or cancelled job back to (null = no reopen).
+      function reopenTarget(job) {
+        if (job.status === "cancelled") return job.kind === "rma" ? "intake" : "open";
+        if (job.status === "packed" || job.status === "checked" || job.status === "shipped") {
+          return job.kind === "rma" ? "outgoing" : "packing";
+        }
+        return null;
+      }
+
+      async function patchJob(job, status, doneKey) {
+        try {
+          await expertApi("/api/expert/jobs/" + job.id, { method: "PATCH", body: { status: status } });
+          C.toast(C.t(doneKey));
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshJobs();
+      }
+
+      function jobActionButton(labelKey, onClick) {
+        var btn = workerButton(labelKey, onClick);
+        return btn;
+      }
+
+      function renderJobRow(job) {
+        var row = document.createElement("tr");
+        row.setAttribute("data-job-id", String(job.id));
+        jobCell(row, job.order_ref + (job.customer ? " – " + job.customer : ""));
+        jobCell(row, job.template_name);
+        jobCell(row, job.unit_count > 1 ? C.fmt(C.t("jobs.carton"), { n: job.unit_no, total: job.unit_count }) : "–");
+        jobCell(row, C.t("status." + job.status));
+        jobCell(row, job.claimed_by_name || "–");
+        jobCell(row, C.fmt(C.t("jobs.progress"), { done: job.lines_done, total: job.lines_total }));
+        var actions = document.createElement("td");
+        if (job.status !== "shipped" && job.status !== "cancelled") {
+          actions.appendChild(jobActionButton("expert.job_cancel", function () {
+            if (!window.confirm(C.fmt(C.t("expert.job_cancel_confirm"), { order: job.order_ref }))) return;
+            patchJob(job, "cancelled", "expert.job_cancelled");
+          }));
+        }
+        var target = reopenTarget(job);
+        if (target) {
+          actions.appendChild(jobActionButton("expert.job_reopen", function () {
+            if (!window.confirm(C.fmt(C.t("expert.job_reopen_confirm"), { order: job.order_ref }))) return;
+            patchJob(job, target, "expert.job_reopened");
+          }));
+        }
+        var label = document.createElement("a");
+        label.className = "btn btn--secondary";
+        label.href = "/druck/etikett/" + job.id;
+        label.target = "_blank";
+        label.rel = "noopener";
+        label.textContent = C.t("expert.job_label");
+        actions.appendChild(label);
+        row.appendChild(actions);
+        return row;
+      }
+
+      async function refreshJobs() {
+        var query = jobFilter.value ? "?status=" + encodeURIComponent(jobFilter.value) : "";
+        var jobs;
+        try {
+          jobs = await expertApi("/api/expert/jobs" + query);
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        clearNode(jobRows);
+        jobs.forEach(function (job) { jobRows.appendChild(renderJobRow(job)); });
+        jobEmpty.hidden = jobs.length > 0;
+      }
+
+      jobTemplate.addEventListener("change", loadJobCustomisation);
+      jobFilter.addEventListener("change", refreshJobs);
+      jobExtraAdd.addEventListener("click", addJobExtra);
+
+      jobForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var templateId = parseInt(jobTemplate.value, 10);
+        var order = jobOrder.value.trim();
+        var count = parseInt(jobCount.value, 10);
+        if (!templateId) {
+          C.toast(C.t("expert.job_template_required"));
+          return;
+        }
+        if (!order) {
+          C.toast(C.t("expert.job_order_required"));
+          return;
+        }
+        if (!(count >= 1 && count <= 20)) {
+          C.toast(C.t("expert.job_count_invalid"));
+          return;
+        }
+        var custom = collectCustomisations();
+        if (custom.error) {
+          C.toast(custom.error);
+          return;
+        }
+        jobCreateBtn.disabled = true;
+        try {
+          var created = await expertApi("/api/expert/jobs", {
+            body: {
+              kind: "delivery",
+              template_id: templateId,
+              order_ref: order,
+              customer: jobCustomer.value.trim(),
+              count: count,
+              customisations: custom.customisations,
+              note: jobNote.value.trim(),
+            },
+          });
+          C.toast(C.fmt(C.t("expert.job_created"), {
+            ids: created.map(function (job) { return "#" + job.id; }).join(", "),
+          }));
+          jobOrder.value = "";
+          jobCustomer.value = "";
+          jobCount.value = "1";
+          jobNote.value = "";
+          await loadJobCustomisation();
+          await refreshJobs();
+        } catch (err) {
+          reportError(err);
+        }
+        jobCreateBtn.disabled = false;
+      });
+
       // Called once the password is known to be good (GET /api/expert/settings
       // succeeded); the same call fills the Einstellungen tab, then the Artikel stats load.
       async function enter() {
@@ -1142,6 +1504,9 @@
         await loadItemStats();
         await refreshWorkers();
         await refreshTemplates();
+        fillJobFilter();
+        await refreshJobTemplates();
+        await refreshJobs();
       }
 
       settingsForm.addEventListener("submit", async function (event) {

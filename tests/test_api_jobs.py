@@ -734,3 +734,25 @@ def test_status_and_error_strings_exist():
                  "wrong_status", "lines_open", "bad_transition", "outgoing_confirmed", "rma_duplicate",
                  "template_empty", "template_inactive", "unknown_template_line", "bad_count", "quality_incomplete"):
         assert strings[f"error.{code}"], code
+
+
+# --- expert job list (Aufträge tab) -------------------------------------------------------------
+
+
+def test_expert_job_list_needs_the_password(client):
+    assert client.get(JOBS).status_code == 401
+    assert client.get(JOBS, headers={"X-Expert-Password": "falsch"}).status_code == 401
+
+
+def test_expert_job_list_defaults_to_unfinished_jobs_newest_first(client):
+    template = _template(client)
+    jobs = _expert_jobs(client, template, count=3)
+    assert client.patch(f"{JOBS}/{jobs[0]['id']}", headers=EXPERT, json={"status": "cancelled"}).status_code == 200
+    listed = client.get(JOBS, headers=EXPERT).json()
+    assert [j["id"] for j in listed] == [jobs[2]["id"], jobs[1]["id"]]
+    assert listed[0]["lines_total"] == 2 and listed[0]["claimed_by_name"] is None
+    cancelled = client.get(JOBS, headers=EXPERT, params={"status": "cancelled"}).json()
+    assert [j["id"] for j in cancelled] == [jobs[0]["id"]]
+    assert len(client.get(JOBS, headers=EXPERT, params={"limit": 1}).json()) == 1
+    assert client.get(JOBS, headers=EXPERT, params={"status": "bogus"}).status_code == 400
+    assert client.get(JOBS, headers=EXPERT, params={"kind": "bogus"}).status_code == 400

@@ -38,5 +38,12 @@ Updated: 2026-11-01
   normalised and written outside the lock. Migration 003 (job_lines.photo_item_id).
   Suite: 495 passed, 2 skipped.
 
+- T5b (2026-11-01, Sonnet, reviewed): Aufträge page (cards, Alle/Meine, ad hoc job),
+  Packen screen (one line at a time, reference photo, quality toggles, serials, camera,
+  In Ordnung / Fehlt / Nicht in Ordnung, extra lines, summary, finish), expert Aufträge
+  tab (create with cartons and customisations, cancel, reopen; new
+  `GET /api/expert/jobs`). Playwright tests run for real against the pre-installed
+  Chromium (`/opt/pw-browsers`). Suite: 506 passed, 2 skipped.
+
 ## Next
-- T5b Packen + Aufträge UI.
+- T6 Second check + box label.

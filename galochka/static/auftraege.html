@@ -18,13 +18,243 @@
   </nav>
   <main class="main">
     <h1 data-i18n="jobs.title"></h1>
-    <p class="note" data-i18n="common.not_available"></p>
+
+    <div class="job-toolbar">
+      <button type="button" id="new-job-btn" class="btn btn--primary" data-i18n="jobs.new"></button>
+      <button type="button" id="rma-btn" class="btn btn--secondary" data-i18n="jobs.rma" disabled></button>
+      <p class="job-hint" data-i18n="jobs.rma_hint"></p>
+    </div>
+
+    <form id="new-job-form" class="job-form settings-section" hidden>
+      <h2 data-i18n="jobs.new"></h2>
+      <div class="field">
+        <label class="field__label" for="new-template" data-i18n="jobs.template"></label>
+        <select id="new-template" class="select"></select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="new-order" data-i18n="jobs.order_no"></label>
+        <input type="text" id="new-order" class="input-id" maxlength="40" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field__label" for="new-customer" data-i18n="jobs.customer"></label>
+        <input type="text" id="new-customer" class="input-id" maxlength="80" autocomplete="off">
+      </div>
+      <div class="form-actions tpl-editor__actions">
+        <button type="button" id="new-job-cancel" class="btn" data-i18n="jobs.cancel"></button>
+        <button type="submit" id="new-job-submit" class="btn btn--primary" data-i18n="jobs.create"></button>
+      </div>
+    </form>
+
+    <div class="tabs job-filter">
+      <button type="button" class="tab-btn" id="filter-all" aria-pressed="true" data-i18n="jobs.filter_all"></button>
+      <button type="button" class="tab-btn" id="filter-mine" aria-pressed="false" data-i18n="jobs.filter_mine"></button>
+    </div>
+
+    <div id="job-list" class="results"></div>
+    <p id="job-empty" class="field__help" data-i18n="jobs.empty" hidden></p>
+
     <footer class="footer"><a href="/experte" data-i18n="nav.expert"></a></footer>
   </main>
 
   <script src="/static/app.js"></script>
   <script>
     (function () {
+      // Statuses shown on the list: everything that still needs somebody (checked = waiting for shipping).
+      var LIST_STATUSES = "open,packing,packed,checked,intake,repair,outgoing";
+
+      var me = null;
+      var jobs = [];
+      var onlyMine = false;
+
+      var jobList = document.getElementById("job-list");
+      var jobEmpty = document.getElementById("job-empty");
+      var newJobBtn = document.getElementById("new-job-btn");
+      var newJobForm = document.getElementById("new-job-form");
+      var newTemplate = document.getElementById("new-template");
+      var newOrder = document.getElementById("new-order");
+      var newCustomer = document.getElementById("new-customer");
+      var newSubmit = document.getElementById("new-job-submit");
+      var filterAll = document.getElementById("filter-all");
+      var filterMine = document.getElementById("filter-mine");
+      var templatesLoaded = false;
+
+      function reportError(err) {
+        C.toast((err && err.detail) || C.t("error.generic"));
+      }
+
+      function clearNode(el) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+      }
+
+      function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function tag(text, className) {
+        return el("span", "tag" + (className ? " " + className : ""), text);
+      }
+
+      function actionButton(label, className, onClick) {
+        var btn = el("button", "btn " + className, label);
+        btn.type = "button";
+        btn.addEventListener("click", onClick);
+        return btn;
+      }
+
+      function actionLink(label, className, href) {
+        var link = el("a", "btn " + className, label);
+        link.href = href;
+        return link;
+      }
+
+      // "Packen": a colleague's claim needs a confirmation; the Packen page claims on load for us otherwise.
+      async function startPacking(job) {
+        if (job.claimed_by && me && job.claimed_by !== me.id) {
+          if (!window.confirm(C.fmt(C.t("jobs.claim_confirm"), { name: job.claimed_by_name || "" }))) return;
+        }
+        if (!job.claimed_by || (me && job.claimed_by !== me.id)) {
+          try {
+            await C.api("/api/jobs/" + job.id + "/claim", { method: "POST" });
+          } catch (err) {
+            reportError(err);
+            return;
+          }
+        }
+        window.location.href = "/packen/" + job.id;
+      }
+
+      async function shipJob(job) {
+        if (!window.confirm(C.fmt(C.t("jobs.ship_confirm"), { order: job.order_ref }))) return;
+        try {
+          await C.api("/api/jobs/" + job.id + "/ship", { method: "POST" });
+          C.toast(C.t("jobs.shipped"));
+        } catch (err) {
+          reportError(err);
+        }
+        await loadJobs();
+      }
+
+      function actionsFor(job) {
+        var box = el("div", "card__actions");
+        if (job.status === "open" || (job.status === "packing" && job.kind === "delivery")) {
+          box.appendChild(actionButton(C.t("jobs.pack"), "btn--primary", function () { startPacking(job); }));
+        } else if (job.status === "packed") {
+          box.appendChild(actionLink(C.t("jobs.check"), "btn--primary", "/pruefen/" + job.id));
+        } else if (job.status === "intake" || job.status === "repair" || job.status === "outgoing") {
+          box.appendChild(actionLink(C.t("jobs.rma_open"), "btn--primary", "/rma/" + job.id));
+        } else if (job.status === "checked") {
+          box.appendChild(actionButton(C.t("jobs.ship"), "btn--primary", function () { shipJob(job); }));
+        }
+        return box;
+      }
+
+      function renderJob(job) {
+        var card = el("div", "card");
+        card.setAttribute("data-job-id", String(job.id));
+        var body = el("div", "card__body");
+        body.appendChild(el("div", "card__id", job.order_ref));
+        if (job.customer) body.appendChild(el("div", "card__name", job.customer));
+        var meta = [job.template_name];
+        if (job.unit_count > 1) meta.push(C.fmt(C.t("jobs.carton"), { n: job.unit_no, total: job.unit_count }));
+        body.appendChild(el("div", "card__meta", meta.join(" · ")));
+        var tags = el("div", "job-tags");
+        tags.appendChild(tag(C.t("status." + job.status), "tag--status"));
+        if (job.ad_hoc) tags.appendChild(tag(C.t("jobs.ad_hoc"), ""));
+        if (job.claimed_by_name) tags.appendChild(tag(C.fmt(C.t("jobs.claimed_by"), { name: job.claimed_by_name }), ""));
+        tags.appendChild(tag(C.fmt(C.t("jobs.progress"), { done: job.lines_done, total: job.lines_total }), ""));
+        body.appendChild(tags);
+        card.appendChild(body);
+        card.appendChild(actionsFor(job));
+        return card;
+      }
+
+      function render() {
+        clearNode(jobList);
+        var shown = jobs.filter(function (job) {
+          return !onlyMine || (me && job.claimed_by === me.id);
+        });
+        shown.forEach(function (job) { jobList.appendChild(renderJob(job)); });
+        jobEmpty.hidden = shown.length > 0;
+      }
+
+      async function loadJobs() {
+        try {
+          jobs = await C.api("/api/jobs?status=" + LIST_STATUSES);
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        render();
+      }
+
+      function setFilter(mine) {
+        onlyMine = mine;
+        filterAll.setAttribute("aria-pressed", String(!mine));
+        filterMine.setAttribute("aria-pressed", String(mine));
+        render();
+      }
+
+      async function loadTemplates() {
+        if (templatesLoaded) return;
+        var templates;
+        try {
+          templates = await C.api("/api/templates");
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        clearNode(newTemplate);
+        templates.forEach(function (tpl) {
+          var option = document.createElement("option");
+          option.value = String(tpl.id);
+          option.textContent = tpl.name;
+          newTemplate.appendChild(option);
+        });
+        templatesLoaded = templates.length > 0;
+        if (!templates.length) C.toast(C.t("jobs.no_templates"));
+      }
+
+      newJobBtn.addEventListener("click", async function () {
+        newJobForm.hidden = !newJobForm.hidden;
+        if (!newJobForm.hidden) {
+          await loadTemplates();
+          newOrder.focus();
+        }
+      });
+      document.getElementById("new-job-cancel").addEventListener("click", function () {
+        newJobForm.hidden = true;
+      });
+      filterAll.addEventListener("click", function () { setFilter(false); });
+      filterMine.addEventListener("click", function () { setFilter(true); });
+
+      newJobForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var templateId = parseInt(newTemplate.value, 10);
+        var order = newOrder.value.trim();
+        if (!templateId) {
+          C.toast(C.t("jobs.template_required"));
+          return;
+        }
+        if (!order) {
+          C.toast(C.t("jobs.order_required"));
+          return;
+        }
+        newSubmit.disabled = true;
+        try {
+          var job = await C.api("/api/jobs", {
+            body: { template_id: templateId, order_ref: order, customer: newCustomer.value.trim() },
+          });
+          window.location.href = "/packen/" + job.id;
+          return;
+        } catch (err) {
+          reportError(err);
+        }
+        newSubmit.disabled = false;
+      });
+
       async function init() {
         try {
           await C.loadStrings();
@@ -32,10 +262,12 @@
           C.toast(C.t("error.generic"));
         }
         // No valid session: go to the badge login and come back here afterwards.
-        var worker = await C.loadMe();
-        if (!worker) {
+        me = await C.loadMe();
+        if (!me) {
           C.goLogin();
+          return;
         }
+        await loadJobs();
       }
       init();
     })();
