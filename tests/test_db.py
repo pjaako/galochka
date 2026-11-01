@@ -63,7 +63,7 @@ def test_migrate_twice_is_a_noop(conn):
     before = [tuple(r) for r in conn.execute("SELECT * FROM schema_migrations")]
     db.migrate(conn)
     after = [tuple(r) for r in conn.execute("SELECT * FROM schema_migrations")]
-    assert before == after == [("001_init.sql",)]
+    assert before == after == [("001_init.sql",), ("002_badge_token.sql",)]
     # seed rows were not duplicated
     assert conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 4
 

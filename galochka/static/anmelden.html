@@ -14,23 +14,138 @@
       <a href="/auftraege" data-i18n="nav.jobs"></a>
     </div>
     <span class="nav__user" id="nav-user"></span>
-    <!-- Logout is wired up and shown by T3 (sessions). -->
     <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
   </nav>
   <main class="main">
     <h1 data-i18n="login.title"></h1>
-    <p class="note" data-i18n="common.not_available"></p>
+    <p class="field__help" data-i18n="login.help"></p>
+
+    <label class="photo-button" for="badge-input" id="badge-button" tabindex="0" role="button">
+      <span id="badge-button-label" data-i18n="login.scan"></span>
+      <input type="file" id="badge-input" accept="image/*" capture="environment" hidden>
+    </label>
+
+    <form id="code-form" class="settings-section">
+      <h2 data-i18n="login.or_code"></h2>
+      <div class="field">
+        <label class="field__label" for="code-input" data-i18n="login.code_label"></label>
+        <input type="text" id="code-input" class="input-id input-code" data-i18n-placeholder="login.code_placeholder"
+          maxlength="6" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off"
+          spellcheck="false">
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="code-btn" class="btn btn--secondary" data-i18n="login.code_submit"></button>
+      </div>
+    </form>
   </main>
 
   <script src="/static/app.js"></script>
   <script>
     (function () {
+      var badgeInput = document.getElementById("badge-input");
+      var badgeButton = document.getElementById("badge-button");
+      var badgeLabel = document.getElementById("badge-button-label");
+      var codeForm = document.getElementById("code-form");
+      var codeInput = document.getElementById("code-input");
+      var codeBtn = document.getElementById("code-btn");
+      var working = false;
+
+      // ?next= is followed only for same-origin relative paths ("/x", not "//host" or "/\host").
+      function nextUrl() {
+        var next = new URLSearchParams(window.location.search).get("next");
+        if (
+          typeof next === "string" &&
+          next.charAt(0) === "/" &&
+          next.charAt(1) !== "/" &&
+          next.charAt(1) !== "\\" &&
+          next.indexOf("/anmelden") !== 0 &&
+          !/[\u0000-\u001f]/.test(next)
+        ) {
+          return next;
+        }
+        return "/auftraege";
+      }
+
+      function setWorking(on) {
+        working = on;
+        badgeButton.classList.toggle("photo-button--working", on);
+        badgeLabel.textContent = on ? C.t("login.scanning") : C.t("login.scan");
+        codeBtn.disabled = on;
+      }
+
+      function reportError(err) {
+        C.toast((err && err.detail) || C.t("error.generic"));
+      }
+
+      function loggedIn() {
+        window.location.href = nextUrl();
+      }
+
+      badgeInput.addEventListener("change", async function () {
+        var file = badgeInput.files && badgeInput.files[0];
+        if (!file || working) return;
+        setWorking(true);
+        var ok = false;
+        try {
+          var blob = await C.downscaleImage(file, 1600, 0.9);
+          var formData = new FormData();
+          formData.append("image", blob, "badge.jpg");
+          await C.api("/api/login/qr", { formData: formData });
+          ok = true;
+        } catch (err) {
+          reportError(err);
+        }
+        badgeInput.value = "";
+        if (ok) {
+          loggedIn();
+        } else {
+          setWorking(false);
+        }
+      });
+
+      // The label is role=button: Enter/Space open the camera like a click.
+      badgeButton.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          badgeInput.click();
+        }
+      });
+
+      codeInput.addEventListener("input", function () {
+        codeInput.value = codeInput.value.toUpperCase().replace(/\s+/g, "");
+      });
+
+      codeForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var code = codeInput.value.trim().toUpperCase();
+        if (code.length !== 6) {
+          C.toast(C.t("login.code_invalid"));
+          return;
+        }
+        if (working) return;
+        setWorking(true);
+        var ok = false;
+        try {
+          await C.api("/api/login/code", { body: { code: code } });
+          ok = true;
+        } catch (err) {
+          reportError(err);
+        }
+        if (ok) {
+          loggedIn();
+        } else {
+          setWorking(false);
+        }
+      });
+
       async function init() {
         try {
           await C.loadStrings();
         } catch (err) {
           C.toast(C.t("error.generic"));
         }
+        // Show who is still logged in on this device (with the logout link); never redirects.
+        await C.loadMe();
       }
       init();
     })();

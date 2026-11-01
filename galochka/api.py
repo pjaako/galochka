@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-from galochka import db, repo
+from galochka import db, qr, repo
+from galochka.audit import audit
 from galochka.cassandra_client import CassandraClient
 from galochka.config import Settings
 
@@ -26,6 +28,10 @@ def t(key: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class CodeLoginRequest(BaseModel):
+    code: str = Field(max_length=64)
 
 
 _MAX_UPLOAD_BYTES = 40 * 1024 * 1024
@@ -73,7 +79,7 @@ def _auto_sync_loop(app: FastAPI, stop: threading.Event, first_delay: float, int
 def create_app(settings: Settings) -> FastAPI:
     # Imported here to avoid a circular import: api_expert -> auth -> api.
     from galochka.api_expert import router as expert_router
-    from galochka.auth import require_worker_or_expert
+    from galochka.auth import SESSION_COOKIE, require_worker, require_worker_or_expert
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.photos_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +156,70 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/druck/badge/{worker_id}")
     def druck_page():
         return _serve_page("druck.html")
+
+    def _start_session(request: Request, response: Response, badge, via: str) -> dict:
+        """Create a session for the worker of `badge`, audit the login and set the cookie.
+
+        A session cookie the browser still sends (someone else's, or an old one) is
+        deleted first. The cookie is HttpOnly, SameSite=Lax, Path=/ and has no Max-Age
+        (it dies with the browser; the server expires idle sessions itself). No Secure
+        flag: the LAN is plain HTTP.
+        """
+        now = _now()
+        old_token = request.cookies.get(SESSION_COOKIE)
+        with lock:
+            if old_token:
+                repo.delete_session(conn, old_token)
+            repo.delete_expired_sessions(conn, now, repo.session_minutes(conn))
+            token = repo.create_session(conn, badge["worker_id"], now)
+            audit(conn, now, f"worker:{badge['worker_id']}", "login", "worker", badge["worker_id"], {"via": via})
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", path="/", secure=False)
+        return {"worker": {"id": badge["worker_id"], "name": badge["name"]}}
+
+    @app.post("/api/login/qr")
+    def login_qr(request: Request, response: Response, image: UploadFile = File(...)):
+        data = _read_upload(image)
+        text = qr.decode_qr(data)  # image decoding stays outside the lock
+        if text is None:
+            raise HTTPException(status_code=400, detail=t("error.bad_image"))
+        match = qr.BADGE_RE.fullmatch(text)
+        badge = None
+        if match:
+            with lock:
+                badge = repo.find_badge_by_token(conn, match.group(1))
+        if badge is None:
+            raise HTTPException(status_code=401, detail=t("error.badge_unknown"))
+        return _start_session(request, response, badge, "qr")
+
+    @app.post("/api/login/code")
+    def login_code(body: CodeLoginRequest, request: Request, response: Response):
+        code = "".join(body.code.split()).upper()
+        with lock:
+            badge = repo.find_badge_by_code(conn, code) if code else None
+        if badge is None:
+            raise HTTPException(status_code=401, detail=t("error.badge_unknown"))
+        return _start_session(request, response, badge, "code")
+
+    @app.post("/api/logout", status_code=204)
+    def logout(request: Request):
+        # Lenient on purpose: an expired or missing session still clears the cookie.
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            with lock:
+                row = repo.get_session_worker(conn, token)
+                repo.delete_session(conn, token)
+                if row is not None:
+                    audit(conn, _now(), f"worker:{row['id']}", "logout", "worker", row["id"])
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="lax")
+        return response
+
+    @app.get("/api/me")
+    def me(request: Request, worker=Depends(require_worker)):
+        return {
+            "worker": {"id": worker["id"], "name": worker["name"]},
+            "expires_at": request.state.session_expires_at,
+        }
 
     @app.get("/api/items", dependencies=[Depends(require_worker_or_expert)])
     def list_items(q: str = "", limit: int = Query(50, ge=1, le=500)):

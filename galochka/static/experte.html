@@ -61,7 +61,27 @@
       </section>
       <section id="tab-vorlagen" class="tab-section" hidden></section>
       <section id="tab-auftraege" class="tab-section" hidden></section>
-      <section id="tab-mitarbeiter" class="tab-section" hidden></section>
+      <section id="tab-mitarbeiter" class="tab-section" hidden>
+        <form id="worker-form">
+          <h2 data-i18n="expert.workers_title"></h2>
+          <div class="field">
+            <label class="field__label" for="worker-name" data-i18n="expert.worker_name"></label>
+            <input type="text" id="worker-name" class="input-id" maxlength="80" autocomplete="off">
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="worker-create-btn" class="btn btn--primary" data-i18n="expert.worker_create"></button>
+          </div>
+        </form>
+        <div id="worker-created" class="note worker-created" role="status" hidden>
+          <p id="worker-created-text"></p>
+          <a id="worker-created-print" class="btn btn--secondary" target="_blank" rel="noopener"
+            data-i18n="expert.worker_print"></a>
+        </div>
+
+        <h2 data-i18n="expert.workers_list"></h2>
+        <p id="workers-empty" class="field__help" data-i18n="expert.workers_empty" hidden></p>
+        <div id="worker-list" class="worker-list"></div>
+      </section>
 
       <section id="tab-einstellungen" class="tab-section" hidden>
         <form id="settings-form">
@@ -233,12 +253,162 @@
         fillSettings(await expertApi("/api/expert/settings"));
       }
 
+
+      // --- Mitarbeiter -------------------------------------------------------------------
+      var workerForm = document.getElementById("worker-form");
+      var workerNameInput = document.getElementById("worker-name");
+      var workerCreateBtn = document.getElementById("worker-create-btn");
+      var workerCreated = document.getElementById("worker-created");
+      var workerCreatedText = document.getElementById("worker-created-text");
+      var workerCreatedPrint = document.getElementById("worker-created-print");
+      var workerList = document.getElementById("worker-list");
+      var workersEmpty = document.getElementById("workers-empty");
+
+      function workerButton(labelKey, onClick) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn--secondary";
+        btn.textContent = C.t(labelKey);
+        btn.addEventListener("click", onClick);
+        return btn;
+      }
+
+      function renderWorker(worker) {
+        var row = document.createElement("div");
+        row.className = "worker-row" + (worker.active ? "" : " worker-row--inactive");
+
+        var info = document.createElement("div");
+        info.className = "worker-row__info";
+        var name = document.createElement("div");
+        name.className = "worker-row__name";
+        name.textContent = worker.name;
+        info.appendChild(name);
+        var meta = document.createElement("div");
+        meta.className = "worker-row__meta";
+        if (worker.badge) {
+          var code = document.createElement("span");
+          code.className = "worker-row__code";
+          code.textContent = worker.badge.short_code;
+          meta.appendChild(document.createTextNode(C.t("expert.worker_code").split("{code}")[0]));
+          meta.appendChild(code);
+          meta.appendChild(document.createTextNode(C.t("expert.worker_code").split("{code}")[1] || ""));
+        } else {
+          meta.appendChild(document.createTextNode(C.t("expert.worker_no_badge")));
+        }
+        if (!worker.active) {
+          meta.appendChild(document.createTextNode(" \u00b7 " + C.t("expert.worker_inactive")));
+        }
+        info.appendChild(meta);
+        row.appendChild(info);
+
+        var actions = document.createElement("div");
+        actions.className = "worker-row__actions";
+        if (worker.badge) {
+          var print = document.createElement("a");
+          print.className = "btn btn--secondary";
+          print.href = "/druck/badge/" + worker.id;
+          print.target = "_blank";
+          print.rel = "noopener";
+          print.textContent = C.t("expert.worker_print");
+          actions.appendChild(print);
+        }
+        actions.appendChild(workerButton("expert.worker_reissue", function () { reissueBadge(worker); }));
+        if (worker.badge) {
+          actions.appendChild(workerButton("expert.worker_revoke", function () { revokeBadge(worker); }));
+        }
+        actions.appendChild(
+          workerButton(worker.active ? "expert.worker_deactivate" : "expert.worker_activate", function () {
+            setWorkerActive(worker, !worker.active);
+          })
+        );
+        row.appendChild(actions);
+        return row;
+      }
+
+      async function loadWorkers() {
+        var workers = await expertApi("/api/expert/workers");
+        while (workerList.firstChild) workerList.removeChild(workerList.firstChild);
+        workers.forEach(function (worker) {
+          workerList.appendChild(renderWorker(worker));
+        });
+        workersEmpty.hidden = workers.length > 0;
+      }
+
+      function showCreated(text, workerId) {
+        workerCreatedText.textContent = text;
+        workerCreatedPrint.href = "/druck/badge/" + workerId;
+        workerCreated.hidden = false;
+      }
+
+      async function refreshWorkers() {
+        try {
+          await loadWorkers();
+        } catch (err) {
+          reportError(err);
+        }
+      }
+
+      async function reissueBadge(worker) {
+        if (!window.confirm(C.fmt(C.t("expert.worker_reissue_confirm"), { name: worker.name }))) return;
+        try {
+          var badge = await expertApi("/api/expert/workers/" + worker.id + "/badge", { method: "POST" });
+          showCreated(C.fmt(C.t("expert.worker_reissued"), { name: worker.name, code: badge.short_code }), worker.id);
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshWorkers();
+      }
+
+      async function revokeBadge(worker) {
+        if (!window.confirm(C.fmt(C.t("expert.worker_revoke_confirm"), { name: worker.name }))) return;
+        try {
+          await expertApi("/api/expert/workers/" + worker.id + "/badge", { method: "DELETE" });
+          workerCreated.hidden = true;
+          C.toast(C.t("expert.worker_revoked"));
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshWorkers();
+      }
+
+      async function setWorkerActive(worker, active) {
+        try {
+          await expertApi("/api/expert/workers/" + worker.id, { method: "PATCH", body: { active: active } });
+        } catch (err) {
+          reportError(err);
+        }
+        await refreshWorkers();
+      }
+
+      workerForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var name = workerNameInput.value.trim();
+        if (!name) {
+          C.toast(C.t("expert.worker_name_required"));
+          return;
+        }
+        workerCreateBtn.disabled = true;
+        try {
+          var created = await expertApi("/api/expert/workers", { body: { name: name } });
+          workerNameInput.value = "";
+          showCreated(
+            C.fmt(C.t("expert.worker_created"), { name: created.name, code: created.badge.short_code }),
+            created.id
+          );
+        } catch (err) {
+          reportError(err);
+        }
+        workerCreateBtn.disabled = false;
+        await refreshWorkers();
+      });
+
       // Called once the password is known to be good (GET /api/expert/settings
       // succeeded); the same call fills the Einstellungen tab, then the Artikel stats load.
       async function enter() {
         await loadSettings();
         showApp();
         await loadItemStats();
+        await refreshWorkers();
       }
 
       settingsForm.addEventListener("submit", async function (event) {

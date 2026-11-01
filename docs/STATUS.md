@@ -19,5 +19,10 @@ Updated: 2026-11-01
   `GET /api/items`, `GET /api/items/{id}/reference`, Artikel tab. Known limit: Cassandra
   has no offset paging, a group with >1000 items is truncated. Suite: 175 passed, 2 skipped.
 
+- T3 (2026-11-01, Sonnet, reviewed): workers, badges (QR `galochka:badge:<token>`,
+  sha256 lookup, plaintext kept only for printing, cleared on revoke), short-code login,
+  HttpOnly session cookie with idle expiry, Anmelden page, Mitarbeiter tab, Dymo badge
+  print page. Migration 002. Suite: 234 passed, 2 skipped.
+
 ## Next
-- T3 Workers + badges + sessions.
+- T4 Templates + BOM import.

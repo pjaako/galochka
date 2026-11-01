@@ -95,12 +95,3 @@ def test_health_counts_only_open_jobs(client):
             )
         conn.commit()
     assert client.get("/health").json() == {"status": "ok", "jobs_open": 3}
-
-
-def test_require_worker_stub_rejects(client):
-    from galochka.auth import require_worker
-
-    with pytest.raises(Exception) as exc:
-        require_worker(None)
-    assert exc.value.status_code == 401
-    assert exc.value.detail == "Die Sitzung ist abgelaufen. Bitte neu anmelden."

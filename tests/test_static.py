@@ -37,6 +37,10 @@ REQUIRED_KEYS = {
     "error.bad_image",
     "error.session_expired",
     "error.generic",
+    "error.badge_unknown",
+    "login.scan",
+    "login.code_submit",
+    "print.button",
     "expert.title",
     "expert.login",
     "expert.wrong_password",
@@ -102,8 +106,45 @@ def test_worker_pages_have_nav_skeleton(client):
         html = client.get(path).text
         assert 'class="nav__brand"' in html
         assert 'class="nav__user"' in html
-        assert 'data-i18n="nav.logout"' in html
+        assert 'id="nav-logout"' in html and 'data-i18n="nav.logout"' in html
+
+
+def test_stub_pages_check_the_session_and_redirect_to_login(client):
+    for path in ("/auftraege", "/packen/1", "/pruefen/1", "/rma/1"):
+        html = client.get(path).text
         assert 'data-i18n="common.not_available"' in html
+        assert "C.loadMe()" in html and "C.goLogin()" in html, path
+    # anmelden shows the current user but never redirects; the print pages do their own auth
+    assert "C.loadMe()" in client.get("/anmelden").text
+    assert "C.goLogin()" not in client.get("/anmelden").text
+    assert "C.loadMe()" not in client.get("/experte").text
+    assert "C.loadMe()" not in client.get("/druck/badge/1").text
+
+
+def test_anmelden_page_has_scan_button_and_code_form(client):
+    html = client.get("/anmelden").text
+    assert 'class="photo-button"' in html
+    assert '<input type="file" id="badge-input" accept="image/*" capture="environment" hidden>' in html
+    assert 'data-i18n="login.scan"' in html
+    assert "photo-button--working" in html
+    assert 'C.downscaleImage(file, 1600, 0.9)' in html
+    assert 'formData.append("image"' in html
+    assert "/api/login/qr" in html and "/api/login/code" in html
+    code_input = re.search(r'<input type="text" id="code-input"[^>]*>', html, re.S).group(0)
+    assert 'maxlength="6"' in code_input
+    assert 'autocapitalize="characters"' in code_input
+    assert 'inputmode="text"' in code_input
+    # ?next= is only followed for same-origin relative paths
+    assert 'next.charAt(0) === "/"' in html and 'next.charAt(1) !== "/"' in html
+    assert '"/auftraege"' in html
+
+
+def test_app_js_has_session_helpers():
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    for name in ("loadMe", "logout", "goLogin", "fmt"):
+        assert re.search(rf"\b{name}\b", js), name
+    assert '"/api/me"' in js and '"/api/logout"' in js
+    assert "noRedirect: true" in js
 
 
 def test_experte_page_has_all_tab_sections(client):
@@ -178,6 +219,35 @@ def test_style_css_has_label_print_rules():
     assert re.search(r"@page\s*\{\s*size:\s*89mm 36mm;\s*margin:\s*2mm;", css)
     assert "body.print" in css
     assert "--brand" in css and "prefers-color-scheme: dark" in css
+
+
+def test_experte_mitarbeiter_tab(client):
+    html = client.get("/experte").text
+    section = re.search(r'<section id="tab-mitarbeiter".*?</section>', html, re.S).group(0)
+    assert "hidden" in section.split(">", 1)[0]
+    assert 'id="worker-form"' in section and 'id="worker-name"' in section
+    assert 'data-i18n="expert.worker_create"' in section
+    assert 'id="worker-list"' in section
+    for key in ("expert.worker_print", "expert.worker_reissue", "expert.worker_deactivate", "expert.worker_activate",
+                "expert.worker_reissue_confirm"):
+        assert key in html, key
+    assert "/api/expert/workers" in html and "/badge" in html
+    assert "/druck/badge/" in html and 'target = "_blank"' in html
+
+
+def test_druck_badge_page_layout_and_blob_flow(client):
+    html = client.get("/druck/badge/3").text
+    assert "URL.createObjectURL" in html and "blob: true" in html
+    assert "/badge.svg" in html and "C.expertApi" in html
+    assert "window.print()" in html and 'data-i18n="print.button"' in html
+    assert 'id="login-form"' in html and "C.getExpertPassword()" in html
+    assert 'class="print-label print-label--badge"' in html
+    assert 'id="badge-name"' in html and 'id="badge-code"' in html
+    # the box label branch stays a stub until T6
+    assert 'id="label-stub"' in html and 'data-i18n="common.not_available"' in html
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"\.badge-label__qr\s*\{[^}]*width:\s*30mm", css)
+    assert "--mono" in css and "badge-label__code" in css
 
 
 def test_experte_artikel_tab_has_sync_and_csv_import(client):

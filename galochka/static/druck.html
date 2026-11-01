@@ -14,22 +14,130 @@
       <a href="/auftraege" data-i18n="nav.jobs"></a>
     </div>
     <span class="nav__user" id="nav-user"></span>
-    <!-- Logout is wired up and shown by T3 (sessions). -->
     <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
   </nav>
   <main class="main">
-    <h1 data-i18n="print.title"></h1>
-    <p class="note" data-i18n="common.not_available"></p>
+    <h1 class="no-print" data-i18n="print.title"></h1>
+
+    <!-- Box label (T6). -->
+    <p id="label-stub" class="note no-print" data-i18n="common.not_available" hidden></p>
+
+    <!-- Badge print page: opened from the office PC with the expert password. -->
+    <form id="login-form" class="login-form no-print" hidden>
+      <p class="field__help" data-i18n="print.password_hint"></p>
+      <input type="password" id="password-input" class="input-id" data-i18n-placeholder="expert.password_placeholder"
+        autocomplete="off">
+      <button type="submit" class="btn btn--primary" data-i18n="expert.login"></button>
+    </form>
+
+    <p id="error-note" class="note no-print" role="alert" hidden></p>
+
+    <div id="badge-view" hidden>
+      <div class="print-label print-label--badge">
+        <img id="badge-qr" class="badge-label__qr" alt="">
+        <div class="badge-label__text">
+          <div id="badge-name" class="badge-label__name"></div>
+          <div id="badge-code" class="badge-label__code"></div>
+        </div>
+      </div>
+      <div class="form-actions no-print">
+        <button type="button" id="print-btn" class="btn btn--primary" data-i18n="print.button"></button>
+      </div>
+    </div>
   </main>
 
   <script src="/static/app.js"></script>
   <script>
     (function () {
+      var loginForm = document.getElementById("login-form");
+      var passwordInput = document.getElementById("password-input");
+      var errorNote = document.getElementById("error-note");
+      var badgeView = document.getElementById("badge-view");
+      var qrImg = document.getElementById("badge-qr");
+      var objectUrl = null;
+
+      var parts = window.location.pathname.split("/");
+      var kind = parts[2];
+      var targetId = parseInt(parts[3], 10);
+
+      function showError(key) {
+        badgeView.hidden = true;
+        errorNote.textContent = C.t(key);
+        errorNote.hidden = false;
+      }
+
+      function showLogin() {
+        badgeView.hidden = true;
+        errorNote.hidden = true;
+        loginForm.hidden = false;
+      }
+
+      async function showBadge() {
+        errorNote.hidden = true;
+        var workers;
+        var svg;
+        try {
+          workers = await C.expertApi("/api/expert/workers");
+          var worker = null;
+          workers.forEach(function (w) {
+            if (w.id === targetId) worker = w;
+          });
+          if (!worker) {
+            showError("print.worker_unknown");
+            return;
+          }
+          if (!worker.badge) {
+            showError("print.no_badge");
+            return;
+          }
+          svg = await C.expertApi("/api/expert/workers/" + targetId + "/badge.svg", { blob: true });
+          document.getElementById("badge-name").textContent = worker.name;
+          document.getElementById("badge-code").textContent = worker.badge.short_code;
+        } catch (err) {
+          if (err && err.status === 401) {
+            showLogin(); // expertApi already cleared the password and toasted
+          } else if (err && err.status === 404) {
+            showError("print.no_badge");
+          } else {
+            C.toast((err && err.detail) || C.t("error.generic"));
+          }
+          return;
+        }
+        loginForm.hidden = true;
+        // A blob URL keeps the token off the address bar and out of history.
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = URL.createObjectURL(svg);
+        qrImg.src = objectUrl;
+        qrImg.alt = C.t("print.badge_alt");
+        badgeView.hidden = false;
+      }
+
+      loginForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        C.setExpertPassword(passwordInput.value);
+        passwordInput.value = "";
+        showBadge();
+      });
+
+      document.getElementById("print-btn").addEventListener("click", function () {
+        window.print();
+      });
+
       async function init() {
         try {
           await C.loadStrings();
         } catch (err) {
           C.toast(C.t("error.generic"));
+        }
+        if (kind === "badge") {
+          if (C.getExpertPassword()) {
+            await showBadge();
+          } else {
+            showLogin();
+          }
+        } else {
+          // /druck/etikett/<job_id>: the box label arrives with T6.
+          document.getElementById("label-stub").hidden = false;
         }
       }
       init();

@@ -23,7 +23,8 @@
   // A 401 on a worker path (anything but /api/expert and /api/login) means the
   // session is missing or expired: the browser is sent to /anmelden?next=<page>
   // and the error is still thrown so the caller stops. Pass noRedirect: true to
-  // handle a 401 yourself (the print page does, to retry as expert).
+  // handle a 401 yourself (the print page does, to retry as expert). Pass
+  // blob: true to get the body of a successful answer as a Blob (badge SVG).
   async function api(path, opts) {
     opts = opts || {};
     // A GET request cannot carry a body; fetch throws synchronously if one is set.
@@ -43,6 +44,9 @@
     var resp = await fetch(path, init);
     if (resp.status === 204) {
       return null;
+    }
+    if (resp.ok && opts.blob) {
+      return resp.blob();
     }
     var data = null;
     try {
@@ -129,6 +133,54 @@
     }
   }
 
+  // Fill a template string: every {name} in it is replaced by vars.name.
+  function fmt(template, vars) {
+    var out = template;
+    Object.keys(vars).forEach(function (key) {
+      out = out.split("{" + key + "}").join(String(vars[key]));
+    });
+    return out;
+  }
+
+  // The logged-in worker ({id, name}) or null. Fills .nav__user with the name and
+  // shows the "Abmelden" link (#nav-logout). Never redirects; pages decide (goLogin).
+  async function loadMe() {
+    var worker = null;
+    try {
+      var me = await api("/api/me", { noRedirect: true });
+      worker = me && me.worker ? me.worker : null;
+    } catch (e) {
+      worker = null;
+    }
+    var userEl = document.querySelector(".nav__user");
+    if (userEl) userEl.textContent = worker ? worker.name : "";
+    var logoutEl = document.getElementById("nav-logout");
+    if (logoutEl) {
+      logoutEl.hidden = !worker;
+      logoutEl.onclick = function (event) {
+        event.preventDefault();
+        logout();
+      };
+    }
+    return worker;
+  }
+
+  // End the session and go to the login page (also when the call fails).
+  async function logout() {
+    try {
+      await api("/api/logout", { method: "POST", noRedirect: true });
+    } catch (e) {
+      // the server drops the session on its own after the idle time
+    }
+    window.location.href = "/anmelden";
+  }
+
+  // Send the browser to the badge login and come back to this page afterwards.
+  function goLogin() {
+    window.location.href =
+      "/anmelden?next=" + encodeURIComponent(window.location.pathname + window.location.search);
+  }
+
   var toastTimer = null;
   function toast(msg) {
     var el = document.getElementById("toast");
@@ -185,5 +237,6 @@
     downscaleImage: downscaleImage, t: t, loadStrings: loadStrings, api: api, toast: toast,
     expertApi: expertApi, getExpertPassword: getExpertPassword, setExpertPassword: setExpertPassword,
     clearExpertPassword: clearExpertPassword, renderPhotoTile: renderPhotoTile,
+    fmt: fmt, loadMe: loadMe, logout: logout, goLogin: goLogin,
   };
 })();

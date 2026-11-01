@@ -585,6 +585,109 @@ body.print .print-label {
   }
 }
 
+/* Worker badge on the 36 x 89 mm label: QR left, name and short code right. */
+body.print .print-label--badge {
+  display: flex;
+  align-items: center;
+  gap: 3mm;
+  box-sizing: border-box;
+  padding: 1mm;
+  margin-top: 16px;
+  border: 1px dashed var(--line);
+}
+
+.badge-label__qr {
+  display: block;
+  width: 30mm;
+  height: 30mm;
+  flex-shrink: 0;
+}
+
+.badge-label__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.badge-label__name {
+  font: 600 15pt/1.15 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.badge-label__code {
+  margin-top: 2mm;
+  font: 500 13pt/1.2 var(--mono);
+  letter-spacing: 0.08em;
+}
+
+@media print {
+  body.print .print-label--badge {
+    margin: 0;
+    border: none;
+  }
+}
+
+/* ============================================================
+   LOGIN AND WORKERS
+   ============================================================ */
+.input-code {
+  font-family: var(--mono);
+  font-size: 20px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.worker-created {
+  margin-top: 16px;
+}
+
+.worker-list {
+  margin-top: 8px;
+}
+
+.worker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.worker-row--inactive .worker-row__name {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.worker-row__info {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.worker-row__name {
+  font: 600 16px/1.4 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.worker-row__meta {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.worker-row__code {
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
+.worker-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worker-row__actions .btn {
+  width: auto;
+}
+
 /* ============================================================
    HIDDEN OVERRIDE
    Controller ruling: the one permitted !important. Several component

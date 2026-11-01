@@ -1,6 +1,10 @@
 # Known issues and deferred minors (as of 2026-11-01)
 
-None yet. Items deferred during reviews are collected here.
+Items deferred during reviews are collected here.
+
+## Behaviour
+- No rate limit on `POST /api/login/code` (6 chars from a 32-letter alphabet, LAN only).
+  Acceptable for now; add a per-IP delay if the app ever leaves the LAN.
 
 ## Deferred by design
 - Photo storage growth (≈5 GB/year at per-line photos) and backup archive size: a

@@ -14,7 +14,6 @@
       <a href="/auftraege" data-i18n="nav.jobs"></a>
     </div>
     <span class="nav__user" id="nav-user"></span>
-    <!-- Logout is wired up and shown by T3 (sessions). -->
     <a href="#" id="nav-logout" data-i18n="nav.logout" hidden></a>
   </nav>
   <main class="main">
@@ -30,6 +29,11 @@
           await C.loadStrings();
         } catch (err) {
           C.toast(C.t("error.generic"));
+        }
+        // No valid session: go to the badge login and come back here afterwards.
+        var worker = await C.loadMe();
+        if (!worker) {
+          C.goLogin();
         }
       }
       init();
