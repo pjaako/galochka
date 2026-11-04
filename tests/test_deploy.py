@@ -29,6 +29,8 @@ def test_systemd_unit_has_required_directives():
     text = SERVICE_UNIT.read_text()
     assert "ExecStart=/opt/galochka/.venv/bin/galochka serve" in text
     assert "EnvironmentFile=/etc/galochka.env" in text
+    # port 80 as the unprivileged galochka user
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE" in text
 
 
 def test_galochka_cli_has_valid_bash_syntax():
@@ -131,7 +133,7 @@ def test_install_sh_writes_galochka_env_file():
     text = INSTALL_SH.read_text()
     for line in (
         "GALOCHKA_DATA=$DATA_DIR",
-        "GALOCHKA_PORT=8081",
+        "GALOCHKA_PORT=80",
         "GALOCHKA_EXPERT_PASSWORD=$PASSWORD",
         "GALOCHKA_CASSANDRA_URL=http://cassandra",
     ):
@@ -140,7 +142,7 @@ def test_install_sh_writes_galochka_env_file():
     # no ML leftovers from Cassandra
     for banned in ("torch", "transformers", "HF_HOME", "HF_HUB_OFFLINE", "cassandra.service"):
         assert banned not in text.replace("http://cassandra", ""), banned
-    assert "http://$IP:8081" in text
+    assert "http://$IP\"" in text
     assert "Generated expert password" in text
 
 

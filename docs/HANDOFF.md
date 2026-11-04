@@ -23,11 +23,11 @@ to a real machine. The owner still has to run the acceptance test on the LXC (se
 | App code and venv | `/opt/galochka` (root-owned git checkout, `.venv` inside) |
 | Data | `/var/lib/galochka`: `galochka.db` (+ `-wal`/`-shm`), `photos/jobs/<job_id>/<uuid>.jpg` |
 | Config | `/etc/galochka.env` (0640 root:galochka) |
-| Service | systemd `galochka`, user `galochka`, port 8081, `ExecStart=… galochka serve --host 0.0.0.0` |
+| Service | systemd `galochka`, user `galochka`, port 80 (`AmbientCapabilities=CAP_NET_BIND_SERVICE`), `ExecStart=… galochka serve --host 0.0.0.0` |
 | CLI | `/usr/local/bin/galochka-cli` (`migrate`, `serve`) |
 | Sister app | Cassandra in another LXC, `http://cassandra` |
 
-Two LXCs: `galotschka.local` (this app, 8081) and `cassandra` (Cassandra, port 80).
+Two LXCs: `galotschka.local` (this app, port 80) and `cassandra` (Cassandra, port 80).
 galochka calls Cassandra over HTTP only (item list, reference photos; 2 s timeout, caches
 in table `cassandra_cache`); Cassandra never calls galochka. All Cassandra URLs live in
 `galochka/cassandra_client.py` (the only place to touch when Cassandra's API changes).
@@ -53,13 +53,13 @@ photos (about 5 GB per year is the estimate).
 3. Verify:
    ```
    systemctl status galochka --no-pager
-   curl -s http://127.0.0.1:8081/health        # {"status":"ok","jobs_open":0}
+   curl -s http://127.0.0.1/health        # {"status":"ok","jobs_open":0}
    journalctl -u galochka -n 50 --no-pager
    ```
    If `hostname -I` printed an address the phones cannot reach, use `galotschka.local`.
 4. Set `GALOCHKA_CASSANDRA_URL` in `/etc/galochka.env` if Cassandra is elsewhere
    (install.sh wrote `http://cassandra`), then `sudo systemctl restart galochka`.
-5. Browser, `http://galotschka.local:8081/experte`: log in, Artikel, "Artikel von Cassandra
+5. Browser, `http://galotschka.local/experte`: log in, Artikel, "Artikel von Cassandra
    laden" (about 1500 to 3000 active items expected; CSV import is the fallback).
 6. Office PC: install the Dymo label software/driver and load Dymo large address labels
    (36x89 mm). The browser must see the printer.
@@ -84,7 +84,7 @@ CSV export in Excel.
 | Update | `cd /opt/galochka && sudo git pull && sudo bash deploy/install.sh` |
 | Logs | `journalctl -u galochka -f` |
 | Restart | `sudo systemctl restart galochka` |
-| Health | `curl -s http://galotschka.local:8081/health` (`jobs_open` = jobs not shipped/cancelled) |
+| Health | `curl -s http://galotschka.local/health` (`jobs_open` = jobs not shipped/cancelled) |
 | Migrate by hand | `sudo galochka-cli migrate` (also runs at every start) |
 | Backup | `sudo bash /opt/galochka/deploy/backup.sh /mnt/nas/galochka` (keeps 8 archives) |
 | Restore | README, section "Restore" |
@@ -201,7 +201,7 @@ restart (they are in the database).
 | Item import deactivated most items | a filtered export was imported (absent items are deactivated) | import the full export, or sync from Cassandra |
 | Label prints on two pages or cut off | print dialog paper size | paper 36x89 mm (Dymo large address, landscape), scale 100 %, headers/footers off. Page CSS is `@page { size: 89mm 36mm; margin: 2mm }`, one label per page |
 | Badge print page: "Experten-Passwort nötig" | the office PC has no worker session | enter the expert password (kept in the tab's sessionStorage) |
-| Phone cannot reach the server | DNS or firewall | try the IP; `ss -ltn \| grep 8081`; open TCP 8081 in the LAN |
+| Phone cannot reach the server | DNS or firewall | try the IP; `ss -ltn \| grep ":80 "`; open TCP 80 in the LAN |
 | Service restarts in a loop | bad env file, port in use, unreadable data dir | `journalctl -u galochka -n 100`; `chown -R galochka:galochka /var/lib/galochka` |
 | Disk fills up | photos, about 5 GB per year, plus 8 backup copies | see backlog (pruning); check `du` as in section 3 |
 

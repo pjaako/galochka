@@ -23,7 +23,7 @@ The sister app **Cassandra** (`/home/user/cassandra`, same company, same owner) 
 | Set templates | MRPeasy BOM CSV import (owner will commit a sample; importer mapping isolated for adaptation) + expert editing in the app. |
 | Worker identity | Personal printed badge with QR (random token) + 6-char short code fallback. Scan = photo → server-side zxing decode (Cassandra `/api/qr` pattern). Session cookie until logout or idle expiry (setting `session_minutes`, default 30). |
 | Expert area | Shared expert password from `/etc/galochka.env` (`X-Expert-Password` header, Cassandra pattern). Env-only, no change-password UI. |
-| Deploy | Debian 13 LXC, `deploy/install.sh` idempotent pattern, systemd `galochka`, port 8081, data `/var/lib/galochka`, env `/etc/galochka.env`. Update = `git pull && sudo bash deploy/install.sh`. |
+| Deploy | Debian 13 LXC, `deploy/install.sh` idempotent pattern, systemd `galochka`, port 80 via `GALOCHKA_PORT` (`AmbientCapabilities=CAP_NET_BIND_SERVICE`), data `/var/lib/galochka`, env `/etc/galochka.env`. Update = `git pull && sudo bash deploy/install.sh`. |
 | Job start | Office creates jobs (queue) AND worker may start ad hoc (`ad_hoc=1`). |
 | Customisation | Office: per job, lines withheld / extra with reason. Worker: may deviate with reason; deviations highlighted in record and reports. |
 | Evidence | Photo per line (required/optional per template line). Quality points per line (configurable, defaults: sauber, unbeschädigt, Funktion geprüft). Serial per line (optional per template line). Worker-added extra line and `not_ok` need a photo; `missing` needs only a reason. |

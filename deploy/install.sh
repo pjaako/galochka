@@ -45,7 +45,7 @@ if [ ! -f /etc/galochka.env ]; then
     PASSWORD=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 12)
     cat > /etc/galochka.env <<EOF_ENV
 GALOCHKA_DATA=$DATA_DIR
-GALOCHKA_PORT=8081
+GALOCHKA_PORT=80
 GALOCHKA_EXPERT_PASSWORD=$PASSWORD
 GALOCHKA_CASSANDRA_URL=http://cassandra
 EOF_ENV
@@ -63,7 +63,7 @@ IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [ -z "$IP" ]; then
     IP="$(hostname)"
 fi
-echo "galochka is running at: http://$IP:8081"
+echo "galochka is running at: http://$IP"
 if [ "$FIRST_INSTALL" -eq 1 ]; then
     PW="$(grep -E '^GALOCHKA_EXPERT_PASSWORD=' /etc/galochka.env | cut -d= -f2-)"
     echo "Generated expert password: $PW"

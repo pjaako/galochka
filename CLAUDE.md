@@ -44,7 +44,8 @@ BOM import top level only; CSV export of the audit trail.
 ## Environment rules
 
 - Debian 13 (trixie), Python 3.13. Production: an LXC reachable as `galotschka.local`,
-  Cassandra as `cassandra` (port 80, resolved via the site search domain). Port 8081.
+  Cassandra as `cassandra` (port 80, resolved via the site search domain). galochka serves on port 80 in
+  production (the unit grants `CAP_NET_BIND_SERVICE`), 8081 in dev.
 - **Plain HTTP on the LAN.** Browsers block `getUserMedia`, service workers and the
   Clipboard API on non-secure origins. The only camera path is
   `<input type="file" accept="image/*" capture="environment">` (Cassandra pattern).

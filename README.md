@@ -45,21 +45,21 @@ The script installs system packages (`python3`, `python3-venv`, `python3-pip`, `
 `pip install -e .`, writes `/etc/galochka.env` with a random 12-character expert
 password (only if the file does not exist yet), installs `/usr/local/bin/galochka-cli`
 and the systemd unit `galochka`, and enables and restarts the service. It prints the
-URL (`http://<ip>:8081`) and, on first install only, the generated expert password.
+URL (`http://<ip>`) and, on first install only, the generated expert password.
 Write the password down. The script is idempotent.
 
 Check it:
 
 ```
 systemctl status galochka --no-pager
-curl -s http://127.0.0.1:8081/health      # {"status":"ok","jobs_open":0}
+curl -s http://127.0.0.1/health      # {"status":"ok","jobs_open":0}
 ```
 
 ## First steps
 
 Do this once, in a browser on the office PC.
 
-1. Open `http://galotschka.local:8081/experte` (or the printed IP) and log in with the
+1. Open `http://galotschka.local/experte` (or the printed IP) and log in with the
    expert password.
 2. Tab **Artikel**: click "Artikel von Cassandra laden". The page shows the number of
    active items and the time of the last sync. If Cassandra is not reachable, use the
@@ -83,7 +83,7 @@ Do this once, in a browser on the office PC.
 
 ## Daily use (workers)
 
-- **Login**: open `http://galotschka.local:8081`, tap "Ausweis scannen" and photograph
+- **Login**: open `http://galotschka.local`, tap "Ausweis scannen" and photograph
   the QR code on the badge, or type the 6-character short code. The session ends with
   "Abmelden" or after the idle time from Einstellungen.
 - **Aufträge**: list of open jobs ("Alle" or "Meine"). "Neuer Auftrag" starts an ad hoc
@@ -157,7 +157,7 @@ the restore; they are just unreferenced.
 | Variable | Default | Meaning |
 |---|---|---|
 | `GALOCHKA_DATA` | `./data` (install.sh writes `/var/lib/galochka`) | data directory: `galochka.db`, `photos/` |
-| `GALOCHKA_PORT` | `8081` | HTTP port of `galochka serve` |
+| `GALOCHKA_PORT` | `8081` | HTTP port of `galochka serve`; install.sh writes `80` (the unit grants `CAP_NET_BIND_SERVICE`) |
 | `GALOCHKA_EXPERT_PASSWORD` | `experte` (install.sh writes a random one) | shared password of the expert area, sent as `X-Expert-Password` |
 | `GALOCHKA_CASSANDRA_URL` | empty (install.sh writes `http://cassandra`) | base URL of Cassandra; empty = no sync, no reference photos, CSV import only |
 | `GALOCHKA_AUTO_SYNC` | `1` | `0`, `false`, `no`, `off` or empty disables the daily item sync (first run 10 s after start, then every 24 h); not written by install.sh |
