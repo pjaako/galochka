@@ -47,7 +47,7 @@ if [ ! -f /etc/galochka.env ]; then
 GALOCHKA_DATA=$DATA_DIR
 GALOCHKA_PORT=8081
 GALOCHKA_EXPERT_PASSWORD=$PASSWORD
-GALOCHKA_CASSANDRA_URL=http://cassandra.local:8080
+GALOCHKA_CASSANDRA_URL=http://cassandra
 EOF_ENV
     chmod 0640 /etc/galochka.env
     chown root:galochka /etc/galochka.env

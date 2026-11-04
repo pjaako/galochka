@@ -25,9 +25,9 @@ to a real machine. The owner still has to run the acceptance test on the LXC (se
 | Config | `/etc/galochka.env` (0640 root:galochka) |
 | Service | systemd `galochka`, user `galochka`, port 8081, `ExecStart=… galochka serve --host 0.0.0.0` |
 | CLI | `/usr/local/bin/galochka-cli` (`migrate`, `serve`) |
-| Sister app | Cassandra in another LXC, `http://cassandra.local:8080` |
+| Sister app | Cassandra in another LXC, `http://cassandra` |
 
-Two LXCs: `galotschka.local` (this app, 8081) and `cassandra.local` (Cassandra, 8080).
+Two LXCs: `galotschka.local` (this app, 8081) and `cassandra` (Cassandra, port 80).
 galochka calls Cassandra over HTTP only (item list, reference photos; 2 s timeout, caches
 in table `cassandra_cache`); Cassandra never calls galochka. All Cassandra URLs live in
 `galochka/cassandra_client.py` (the only place to touch when Cassandra's API changes).
@@ -41,8 +41,8 @@ Needs: root, internet during install (apt, PyPI), a few hundred MB disk plus roo
 photos (about 5 GB per year is the estimate).
 
 1. Create the LXC (Debian 13) and give it the DNS name `galotschka.local` (router/DNS
-   entry or mDNS; phones must resolve it). Check that it can reach `cassandra.local:8080`:
-   `curl -s http://cassandra.local:8080/health`.
+   entry or mDNS; phones must resolve it). Check that it can reach `cassandra` (port 80):
+   `curl -s http://cassandra/health`.
 2. Clone and install:
    ```
    git clone https://github.com/pjaako/galochka.git galochka && cd galochka
@@ -58,7 +58,7 @@ photos (about 5 GB per year is the estimate).
    ```
    If `hostname -I` printed an address the phones cannot reach, use `galotschka.local`.
 4. Set `GALOCHKA_CASSANDRA_URL` in `/etc/galochka.env` if Cassandra is elsewhere
-   (install.sh wrote `http://cassandra.local:8080`), then `sudo systemctl restart galochka`.
+   (install.sh wrote `http://cassandra`), then `sudo systemctl restart galochka`.
 5. Browser, `http://galotschka.local:8081/experte`: log in, Artikel, "Artikel von Cassandra
    laden" (about 1500 to 3000 active items expected; CSV import is the fallback).
 6. Office PC: install the Dymo label software/driver and load Dymo large address labels
@@ -183,7 +183,7 @@ restart (they are in the database).
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| Sync button: "Cassandra ist nicht erreichbar" (HTTP 502) | Cassandra down, wrong `GALOCHKA_CASSANDRA_URL`, DNS | `curl http://cassandra.local:8080/api/groups` from the galochka LXC; the catalog is left as it was; CSV import as fallback; the daily sync logs a warning and retries in 24 h |
+| Sync button: "Cassandra ist nicht erreichbar" (HTTP 502) | Cassandra down, wrong `GALOCHKA_CASSANDRA_URL`, DNS | `curl http://cassandra/api/groups` from the galochka LXC; the catalog is left as it was; CSV import as fallback; the daily sync logs a warning and retries in 24 h |
 | Sync says "nicht konfiguriert" (409) | URL empty in the env file | set it, restart |
 | Empty reference tile | no photo in Cassandra, or Cassandra down | not a blocker; answers cached 10 min (failures 60 s, stale answers served on error) |
 | Sync shows the warning "unvollständige Liste" | a Cassandra group (or the ungrouped listing) has more than 1000 items; Cassandra has no offset paging. The sync still upserts what it got and deactivates nothing | split the group in MRPeasy, or add paging to Cassandra's `/api/items` (backlog) |

@@ -25,7 +25,7 @@ reference photos.
   is the system camera opened by a file input (no live viewfinder).
 - A Dymo large address label printer (36x89 mm) connected to the office PC, with the
   Dymo driver installed. Phones do not print.
-- A reachable Cassandra (default `http://cassandra.local:8080`) is recommended, not
+- A reachable Cassandra (default `http://cassandra`) is recommended, not
   required.
 
 ## Install
@@ -159,7 +159,7 @@ the restore; they are just unreferenced.
 | `GALOCHKA_DATA` | `./data` (install.sh writes `/var/lib/galochka`) | data directory: `galochka.db`, `photos/` |
 | `GALOCHKA_PORT` | `8081` | HTTP port of `galochka serve` |
 | `GALOCHKA_EXPERT_PASSWORD` | `experte` (install.sh writes a random one) | shared password of the expert area, sent as `X-Expert-Password` |
-| `GALOCHKA_CASSANDRA_URL` | empty (install.sh writes `http://cassandra.local:8080`) | base URL of Cassandra; empty = no sync, no reference photos, CSV import only |
+| `GALOCHKA_CASSANDRA_URL` | empty (install.sh writes `http://cassandra`) | base URL of Cassandra; empty = no sync, no reference photos, CSV import only |
 | `GALOCHKA_AUTO_SYNC` | `1` | `0`, `false`, `no`, `off` or empty disables the daily item sync (first run 10 s after start, then every 24 h); not written by install.sh |
 
 Use an ASCII password without spaces, quotes, `$` or `#`: the env file is also sourced

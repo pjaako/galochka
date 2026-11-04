@@ -133,13 +133,13 @@ def test_install_sh_writes_galochka_env_file():
         "GALOCHKA_DATA=$DATA_DIR",
         "GALOCHKA_PORT=8081",
         "GALOCHKA_EXPERT_PASSWORD=$PASSWORD",
-        "GALOCHKA_CASSANDRA_URL=http://cassandra.local:8080",
+        "GALOCHKA_CASSANDRA_URL=http://cassandra",
     ):
         assert line in text, line
     assert "pip\" install -e ." in text
     # no ML leftovers from Cassandra
     for banned in ("torch", "transformers", "HF_HOME", "HF_HUB_OFFLINE", "cassandra.service"):
-        assert banned not in text.replace("cassandra.local", ""), banned
+        assert banned not in text.replace("http://cassandra", ""), banned
     assert "http://$IP:8081" in text
     assert "Generated expert password" in text
 
