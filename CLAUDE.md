@@ -43,7 +43,7 @@ BOM import top level only; CSV export of the audit trail.
 
 ## Environment rules
 
-- Debian 13 (trixie), Python 3.13. Production: an LXC reachable as `galochka.local`,
+- Debian 13 (trixie), Python 3.13. Production: an LXC reachable as `galotschka.local`,
   Cassandra as `cassandra.local`. Port 8081.
 - **Plain HTTP on the LAN.** Browsers block `getUserMedia`, service workers and the
   Clipboard API on non-secure origins. The only camera path is

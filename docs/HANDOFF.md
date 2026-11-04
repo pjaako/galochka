@@ -27,7 +27,7 @@ to a real machine. The owner still has to run the acceptance test on the LXC (se
 | CLI | `/usr/local/bin/galochka-cli` (`migrate`, `serve`) |
 | Sister app | Cassandra in another LXC, `http://cassandra.local:8080` |
 
-Two LXCs: `galochka.local` (this app, 8081) and `cassandra.local` (Cassandra, 8080).
+Two LXCs: `galotschka.local` (this app, 8081) and `cassandra.local` (Cassandra, 8080).
 galochka calls Cassandra over HTTP only (item list, reference photos; 2 s timeout, caches
 in table `cassandra_cache`); Cassandra never calls galochka. All Cassandra URLs live in
 `galochka/cassandra_client.py` (the only place to touch when Cassandra's API changes).
@@ -40,7 +40,7 @@ State is only `galochka.db` and `photos/`. Everything else can be rebuilt by
 Needs: root, internet during install (apt, PyPI), a few hundred MB disk plus room for
 photos (about 5 GB per year is the estimate).
 
-1. Create the LXC (Debian 13) and give it the DNS name `galochka.local` (router/DNS
+1. Create the LXC (Debian 13) and give it the DNS name `galotschka.local` (router/DNS
    entry or mDNS; phones must resolve it). Check that it can reach `cassandra.local:8080`:
    `curl -s http://cassandra.local:8080/health`.
 2. Clone and install:
@@ -56,10 +56,10 @@ photos (about 5 GB per year is the estimate).
    curl -s http://127.0.0.1:8081/health        # {"status":"ok","jobs_open":0}
    journalctl -u galochka -n 50 --no-pager
    ```
-   If `hostname -I` printed an address the phones cannot reach, use `galochka.local`.
+   If `hostname -I` printed an address the phones cannot reach, use `galotschka.local`.
 4. Set `GALOCHKA_CASSANDRA_URL` in `/etc/galochka.env` if Cassandra is elsewhere
    (install.sh wrote `http://cassandra.local:8080`), then `sudo systemctl restart galochka`.
-5. Browser, `http://galochka.local:8081/experte`: log in, Artikel, "Artikel von Cassandra
+5. Browser, `http://galotschka.local:8081/experte`: log in, Artikel, "Artikel von Cassandra
    laden" (about 1500 to 3000 active items expected; CSV import is the fallback).
 6. Office PC: install the Dymo label software/driver and load Dymo large address labels
    (36x89 mm). The browser must see the printer.
@@ -84,7 +84,7 @@ CSV export in Excel.
 | Update | `cd /opt/galochka && sudo git pull && sudo bash deploy/install.sh` |
 | Logs | `journalctl -u galochka -f` |
 | Restart | `sudo systemctl restart galochka` |
-| Health | `curl -s http://galochka.local:8081/health` (`jobs_open` = jobs not shipped/cancelled) |
+| Health | `curl -s http://galotschka.local:8081/health` (`jobs_open` = jobs not shipped/cancelled) |
 | Migrate by hand | `sudo galochka-cli migrate` (also runs at every start) |
 | Backup | `sudo bash /opt/galochka/deploy/backup.sh /mnt/nas/galochka` (keeps 8 archives) |
 | Restore | README, section "Restore" |

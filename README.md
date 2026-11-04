@@ -30,7 +30,7 @@ reference photos.
 
 ## Install
 
-On a fresh Debian 13 machine (the production setup is an LXC named `galochka.local`),
+On a fresh Debian 13 machine (the production setup is an LXC named `galotschka.local`, the German spelling of galochka),
 as a user who can `sudo`:
 
 ```
@@ -59,7 +59,7 @@ curl -s http://127.0.0.1:8081/health      # {"status":"ok","jobs_open":0}
 
 Do this once, in a browser on the office PC.
 
-1. Open `http://galochka.local:8081/experte` (or the printed IP) and log in with the
+1. Open `http://galotschka.local:8081/experte` (or the printed IP) and log in with the
    expert password.
 2. Tab **Artikel**: click "Artikel von Cassandra laden". The page shows the number of
    active items and the time of the last sync. If Cassandra is not reachable, use the
@@ -83,7 +83,7 @@ Do this once, in a browser on the office PC.
 
 ## Daily use (workers)
 
-- **Login**: open `http://galochka.local:8081`, tap "Ausweis scannen" and photograph
+- **Login**: open `http://galotschka.local:8081`, tap "Ausweis scannen" and photograph
   the QR code on the badge, or type the 6-character short code. The session ends with
   "Abmelden" or after the idle time from Einstellungen.
 - **Aufträge**: list of open jobs ("Alle" or "Meine"). "Neuer Auftrag" starts an ad hoc
